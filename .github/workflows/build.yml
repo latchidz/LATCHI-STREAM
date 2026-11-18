@@ -93,12 +93,32 @@ jobs:
       - name: Build NSIS installer (x64)
         run: npx electron-builder --win nsis --x64 --publish never
 
-      - name: Zip the NSIS unpacked folder
+      - name: Verify ffmpeg is inside the packaged app
         shell: pwsh
         run: |
-          if (Test-Path dist/win-unpacked) {
-            Compress-Archive -Path dist/win-unpacked/* -DestinationPath dist/LATCHI-STREAM-3.1.0-win-x64.zip -Force
-            Write-Host "zip: $((Get-Item dist/LATCHI-STREAM-3.1.0-win-x64.zip).Length) bytes"
+          $p = 'dist/win-unpacked/resources/ffmpeg/ffmpeg.exe'
+          if (-not (Test-Path $p)) { throw "ffmpeg.exe مفقود من الحزمة: $p" }
+          $sz = (Get-Item $p).Length
+          Write-Host "ffmpeg.exe داخل الحزمة = $sz bytes"
+          if ($sz -lt 1000000) { throw "ffmpeg.exe غير مكتمل ($sz bytes)" }
+
+      - name: Zip the NSIS unpacked folder (المسار المستقر — الأصل الأساسي)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/win-unpacked)) { throw 'dist/win-unpacked غير موجود' }
+          $zip = 'dist/LATCHI-STREAM-win-x64.zip'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path dist/win-unpacked/* -DestinationPath $zip -CompressionLevel Optimal
+          $z = Get-Item $zip
+          Write-Host "zip: $($z.Length) bytes"
+          # سجلّ محتوى حاسم داخل الـ ZIP للتحقق لاحقاً
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $a = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+          $entries = $a.Entries | Where-Object { $_.FullName -like '*ffmpeg*' -or $_.FullName -like '*.exe' }
+          $a.Dispose()
+          $entries | Select-Object FullName, Length | Format-Table -AutoSize
+          if (-not ($entries | Where-Object { $_.FullName -like '*resources/ffmpeg/ffmpeg.exe' -or $_.FullName -like '*resources\ffmpeg\ffmpeg.exe' })) {
+            throw 'ffmpeg.exe غير موجود داخل الـ ZIP'
           }
 
       - name: Build portable (x64)
@@ -115,7 +135,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: LATCHI-STREAM-v3.1.0-windows
+          name: LATCHI-STREAM-v3.2.0-windows
           path: |
             dist/*.exe
             dist/*.zip
@@ -127,8 +147,8 @@ jobs:
         if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release) }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'push' && github.ref_name || 'latchi-stream-v3.1.0' }}
-          name: 'LATCHI STREAM v3.1.0'
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || 'latchi-stream-v3.2.0' }}
+          name: 'LATCHI STREAM v3.2.0'
           draft: false
           generate_release_notes: true
           files: |

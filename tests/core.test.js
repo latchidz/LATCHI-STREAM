@@ -134,7 +134,7 @@ t('غير jpeg مرفوض', !core.isJpeg(Buffer.from([0x00,0x01,0x02,0x03])));
 console.log('--- -re على كل المدخلات (سبب FPS=0.1) ---');
 t('anum re على anullsrc', (()=>{const i=liveS.args.indexOf('anullsrc=channel_layout=stereo:sample_rate=48000'); return i>0 && liveS.args.slice(Math.max(0,i-8),i).includes('-re');})(), liveS.args.slice(Math.max(0,liveS.args.indexOf('anullsrc=channel_layout=stereo:sample_rate=48000')-3), liveS.args.indexOf('anullsrc=channel_layout=stereo:sample_rate=48000')+1));
 const banArgs = core.buildLiveArgs(Object.assign({}, b, {
-  youtubeKey:'155w-qhgj-bxfx-xjac-aww3', audioDevice:'Stereo Mix',
+  youtubeKey:'X1Y2-Z3W4-ABCD-5678', audioDevice:'Stereo Mix',
   bannerEnabled:true, bannerPath:'/banner.png', titleEnabled:false
 }), '/tmp/p.txt').args;
 const bi = banArgs.findIndex(x => String(x).endsWith('/banner.png'));
@@ -143,7 +143,7 @@ t('loop 1 للبانر', bi > 0 && banArgs.includes('-loop') && banArgs[banArgs.
 
 console.log('--- القص عند الالتقاط (أداء) ---');
 const cap = core.buildLiveArgs(Object.assign({}, b, {
-  youtubeKey:'155w-qhgj-bxfx-xjac-aww3', audioDevice:'',
+  youtubeKey:'X1Y2-Z3W4-ABCD-5678', audioDevice:'',
   cropX:30, cropY:55, cropW:1150, cropH:624
 }), '/tmp/p.txt');
 t('gdigrab بـ offset_x', cap.args.includes('-offset_x') && cap.args[cap.args.indexOf('-offset_x')+1]==='30', cap.args[cap.args.indexOf('-offset_x')+1]);
@@ -155,7 +155,7 @@ t('scale للتوحيد موجود', capfc.includes('scale=1150:624'));
 
 console.log('--- وضع النافذة لا يستخدم القص عند الالتقاط ---');
 const wcap = core.buildLiveArgs(Object.assign({}, b, {
-  captureMode:'window', windowTitle:'Notepad', youtubeKey:'155w-qhgj-bxfx-xjac-aww3', audioDevice:''
+  captureMode:'window', windowTitle:'Notepad', youtubeKey:'X1Y2-Z3W4-ABCD-5678', audioDevice:''
 }), '/tmp/p.txt');
 t('لا offset_x في وضع النافذة', !wcap.args.includes('-offset_x'));
 

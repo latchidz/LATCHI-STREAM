@@ -294,12 +294,18 @@ function bindEvents() {
   };
 
   /* ---------------- المعاينة ---------------- */
-  $('#btnPrevStart').onclick = startPreview;
+  $('#btnPrevStart').onclick = async () => {
+    if (!(await checkFfmpeg(true)).ok) return;   // لا نُقلع معاينة بلا ffmpeg
+    return startPreview();
+  };
   $('#btnPrevStop').onclick = stopPreview;
   $('#btnPrevSave').onclick = savePreviewShot;
 
   /* ---------------- البث ---------------- */
-  $('#btnStreamStart').onclick = startStream;
+  $('#btnStreamStart').onclick = async () => {
+    if (!(await checkFfmpeg(true)).ok) return;   // لا نُقلع بثاً بلا ffmpeg
+    return startStream();
+  };
   $('#btnStreamStop').onclick = stopStream;
   $('#btnKeyTest').onclick = testKey;
 
@@ -973,8 +979,93 @@ function openModal(title, hint) {
 
 // ---------------------------------------------------------------- بدء
 window.addEventListener('DOMContentLoaded', () => {
+  try { wireFfPanel(); } catch (e) {}
+  try { checkFfmpeg(false); } catch (e) {}
   boot().catch(e => {
     console.error(e);
     $('#gateHint').textContent = 'خطأ في التحميل: ' + (e && e.message);
   });
 });
+
+
+// ============================================================ نظام ffmpeg المضاد للفشل
+// الفكرة: قبل أي معاينة أو بث نتحقق فعلياً أن ffmpeg قابل للتنفيذ.
+// إن لم يكن ⇒ نُظهر لوحة إصلاح واضحة بدل رسالة عامة أو نافذة تُفتح وتُغلق.
+let FF_OK = null;      // null = لم يُفحص بعد
+
+async function checkFfmpeg(showPanel) {
+  let st = { ok: false };
+  try { st = await window.latchi.ffmpegStatus(); } catch (e) { st = { ok: false, error: String(e) }; }
+  FF_OK = !!st.ok;
+  const chip = document.querySelector('#chipFfmpeg');
+  if (chip) {
+    chip.className = 'chip ' + (st.ok ? 'ok' : 'bad');
+    chip.title = st.ok ? ('ffmpeg ' + (st.version || '') + ' — ' + st.path) : 'ffmpeg غير قابل للتنفيذ';
+  }
+  if (!st.ok && showPanel !== false) openFfPanel(st);
+  return st;
+}
+
+function openFfPanel(st) {
+  const p = document.querySelector('#ffPanel');
+  if (!p) return;
+  const m = document.querySelector('#ffMeta');
+  if (m) {
+    const lines = [];
+    if (st && st.path) lines.push('path: ' + st.path);
+    if (st && st.version) lines.push('version: ' + st.version);
+    if (st && st.reason) lines.push('reason: ' + st.reason);
+    if (st && st.permanentDir) lines.push('permanent: ' + st.permanentDir);
+    if (st && st.searched && st.searched.length) lines.push('searched:\n' + st.searched.slice(0, 8).join('\n'));
+    m.textContent = lines.join('\n');
+  }
+  p.classList.add('on');
+}
+
+function closeFfPanel() {
+  const p = document.querySelector('#ffPanel');
+  if (p) p.classList.remove('on');
+}
+
+function wireFfPanel() {
+  const on = (sel, fn) => { const el = document.querySelector(sel); if (el) el.addEventListener('click', fn); };
+
+  on('#ffRetry', async () => {
+    toast('جارٍ إعادة الفحص وتثبيت ffmpeg في مجلد دائم…', 'info', 5000);
+    let r = {};
+    try { r = await window.latchi.ffmpegRetry(); } catch (e) { r = { ok: false, reason: String(e) }; }
+    if (r && r.ok) { FF_OK = true; closeFfPanel(); toast('تم إصلاح ffmpeg (' + (r.version || '') + ')', 'ok', 5000); await checkFfmpeg(false); }
+    else openFfPanel(r || {});
+  });
+
+  on('#ffPick', async () => {
+    let r = {};
+    try { r = await window.latchi.ffmpegPick(); } catch (e) { r = { ok: false, reason: String(e) }; }
+    if (r && r.ok) { FF_OK = true; closeFfPanel(); toast('تم تثبيت ffmpeg من الملف الذي اخترته', 'ok', 5000); await checkFfmpeg(false); }
+    else if (r && !r.canceled) openFfPanel(r || {});
+  });
+
+  on('#ffOpenDir', () => { try { window.latchi.ffmpegOpenDir(); } catch (e) {} });
+  on('#ffSkip', () => { closeFfPanel(); toast('تجاهلت ffmpeg — البث لن يعمل حتى تصلحه', 'warn', 5000); });
+
+  try {
+    window.latchi.onFfmpegReady(d => {
+      if (d && d.ok) {
+        FF_OK = true;
+        const chip = document.querySelector('#chipFfmpeg');
+        if (chip) { chip.className = 'chip ok'; chip.title = 'ffmpeg ' + (d.version || '') + ' — ' + d.path; }
+      }
+    });
+  } catch (e) {}
+}
+
+// اعتراض الضغطتين قبل الإقلاع: إن لم يكن ffmpeg جاهزاً لا نُقلع
+function ffGuard(then) {
+  return async () => {
+    if (FF_OK === null) await checkFfmpeg(false);
+    if (FF_OK === false) { const st = await checkFfmpeg(true); return false; }
+    then();
+    return true;
+  };
+}
+

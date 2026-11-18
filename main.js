@@ -1,9 +1,11 @@
 // ==============================================================================================
-// LATCHI STREAM 3.1.0  -  تطبيق حاسوب حقيقي (Electron)  -  العملية الرئيسية
+// LATCHI STREAM 3.2.0  -  تطبيق حاسوب حقيقي (Electron)  -  العملية الرئيسية
 // ----------------------------------------------------------------------------------------------
 // كل شيء داخل نافذة التطبيق: لا متصفح خارجي، لا خادم ويب، لا منفذ مفتوح.
 // المعاينة، القص، الزوم، البانر، العنوان، والبث الفعلي إلى يوتيوب كلها هنا.
-// جديد 3.1.0: البث في الخلفية (إخفاء النافذة لا يوقف البث)، أيقونة Tray بمشغّل بث،
+// جديد 3.2.0: نظام ffmpeg مضاد للفشل (المجلد الدائم + استثناء Defender + لوحة إصلاح)،
+//             أوضاع شاشة سريعة (fast/fastlight) للمعالجات الضعيفة مثل Celeron N3060.
+// 3.1.0: البث في الخلفية (إخفاء النافذة لا يوقف البث)، أيقونة Tray بمشغّل بث،
 //             إعادة اتصال تلقائي عند الانقطاع، مانع سكون، متصفح مدمج بشاشة كاملة + ESC ×2.
 // ==============================================================================================
 
@@ -42,24 +44,147 @@ function tmpDir() {
 const previewFile  = () => path.join(tmpDir(), 'preview.jpg');
 const progressFile = () => path.join(tmpDir(), 'progress.txt');
 
-// ------------------------------------------------------------------ اكتشاف ffmpeg
-function findFfmpeg() {
-  const exe = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
-  const cands = [];
-  if (process.resourcesPath) cands.push(path.join(process.resourcesPath, 'ffmpeg', exe));
-  cands.push(path.join(__dirname, 'resources', 'ffmpeg', exe));
-  cands.push(path.join(path.dirname(app.getPath('exe')), exe));
-  cands.push(path.join(path.dirname(app.getPath('exe')), 'ffmpeg', exe));
-  cands.push(path.join(path.dirname(app.getPath('exe')), 'tools', exe));
-  if (process.platform === 'win32') cands.push('C:\\ffmpeg\\bin\\ffmpeg.exe');
-  for (const c of cands) { try { if (fs.existsSync(c)) return c; } catch (e) {} }
+// ------------------------------------------------------------------ اكتشاف ffmpeg (نسخة مضادة للفشل)
+// ★ سبب العطل الشهير في النسخة Portable: ffmpeg.exe يُفكّ في %TEMP%\...\resources\ffmpeg
+//   فيمنعه Windows Defender (ASR) من التنفيذ ⇒ spawn ENOENT رغم وجود الملف.
+//   الحل: مسارات دائمة + نسخة في userData\bin + استثناء Defender + تشغيل بمسار مطلق.
+const IS_WIN = process.platform === 'win32';
+const FF_NAME = IS_WIN ? 'ffmpeg.exe' : 'ffmpeg';
+const FF_MIN_BYTES = 1000000;   // أقل من هذا = ملف تالف/ناقص
+
+function ffBinDir() {
+  const d = path.join(cfgDir(), 'bin');
+  try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); } catch (e) {}
+  return d;
+}
+
+function ffmpegCandidates() {
+  const c = [];
+  // 1) النسخة الدائمة المثبّتة (المفضّلة — خارج %TEMP%)
+  c.push(path.join(ffBinDir(), FF_NAME));
+  c.push(path.join(cfgDir(), FF_NAME));
+  // 2) داخل الحزمة
+  if (process.resourcesPath) c.push(path.join(process.resourcesPath, 'ffmpeg', FF_NAME));
+  c.push(path.join(__dirname, 'resources', 'ffmpeg', FF_NAME));
+  // 3) بجانب التطبيق (نسخة ZIP — المسار المستقر D:\LATCHI)
+  const exeDir = path.dirname(app.getPath('exe'));
+  c.push(path.join(exeDir, FF_NAME));
+  c.push(path.join(exeDir, 'ffmpeg', FF_NAME));
+  c.push(path.join(exeDir, 'resources', 'ffmpeg', FF_NAME));
+  c.push(path.join(exeDir, 'tools', FF_NAME));
+  c.push(path.join(exeDir, 'bin', FF_NAME));
+  // 4) مسارات نظام شائعة
+  if (IS_WIN) {
+    c.push('C:\\ffmpeg\\bin\\ffmpeg.exe');
+    const la = process.env.LOCALAPPDATA;
+    if (la) c.push(path.join(la, 'LatchiStream', 'ffmpeg.exe'));
+  }
+  // 5) PATH
   const PATH = process.env.PATH || process.env.Path || '';
   for (const dir of PATH.split(path.delimiter)) {
-    if (!dir) continue;
-    const p = path.join(dir, exe);
-    try { if (fs.existsSync(p)) return p; } catch (e) {}
+    if (dir) c.push(path.join(dir, FF_NAME));
   }
-  return null;
+  // إزالة التكرار مع حفظ الترتيب
+  const seen = new Set(); const out = [];
+  for (const x of c) { const k = x.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(x); } }
+  return out;
+}
+
+function isUsableFf(p) {
+  try { const st = fs.statSync(p); return st.isFile() && st.size > FF_MIN_BYTES; } catch (e) { return false; }
+}
+
+// تنفيذ فعلي للتحقق: ffmpeg -version ⇒ يجب أن يطبع «ffmpeg version» ويخرج بالكود 0
+function ffmpegWorks(p, timeoutMs) {
+  return new Promise(resolve => {
+    if (!isUsableFf(p)) return resolve({ ok: false, reason: 'الملف مفقود أو صغير جداً', version: '' });
+    let out = '', done = false;
+    let pr;
+    try { pr = spawn(p, ['-hide_banner', '-version'], { windowsHide: true, cwd: tmpDir() }); }
+    catch (e) { return resolve({ ok: false, reason: 'spawn فشل: ' + e.message, version: '' }); }
+    const fin = r => { if (!done) { done = true; clearTimeout(to); resolve(r); } };
+    const to = setTimeout(() => { try { killTree(pr); } catch (e) {} fin({ ok: false, reason: 'انتهت المهلة (' + (timeoutMs||8000) + 'ms) — غالباً منع أمني', version: '' }); }, timeoutMs || 8000);
+    pr.stdout.on('data', d => { out += d.toString(); });
+    pr.stderr.on('data', d => { out += d.toString(); });
+    pr.on('error', e => fin({ ok: false, reason: 'خطأ التنفيذ: ' + (e.code || e.message), version: '' }));
+    pr.on('close', code => {
+      const m = /ffmpeg version\s+(\S+)/i.exec(out);
+      if (code === 0 && m) fin({ ok: true, reason: '', version: m[1] });
+      else fin({ ok: false, reason: 'خرج بالكود ' + code + (m ? '' : ' بلا بصمة إصدار'), version: m ? m[1] : '' });
+    });
+  });
+}
+
+// تثبيت دائم: نسخ ffmpeg إلى userData\bin (خارج %TEMP%) + محاولة استثناء Defender
+function installFfmpegPermanent(src) {
+  try {
+    const dst = path.join(ffBinDir(), FF_NAME);
+    if (path.resolve(src).toLowerCase() !== path.resolve(dst).toLowerCase()) {
+      fs.copyFileSync(src, dst);
+    }
+    // إزالة علامة «ملف من الإنترنت» التي تُفعّل فحص ASR
+    if (IS_WIN) {
+      try {
+        const zone = dst + ':Zone.Identifier';
+        if (fs.existsSync(zone)) fs.unlinkSync(zone);
+      } catch (e) {}
+      // استثناء Defender لمجلدنا (قد يفشل بلا صلاحيات — غير حرج)
+      try {
+        const { execFile } = require('child_process');
+        const cmd = 'Add-MpPreference -ExclusionPath "' + ffBinDir() + '"; Add-MpPreference -ExclusionProcess "' + FF_NAME + '"';
+        execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', cmd],
+          { windowsHide: true, timeout: 15000 }, () => {});
+      } catch (e) {}
+    }
+    return isUsableFf(dst) ? dst : '';
+  } catch (e) { return ''; }
+}
+
+// الاختيار النهائي: أول مرشّح يعمل فعلياً ⇒ انسخه لمسار دائم إن كان في %TEMP%
+async function resolveFfmpeg(force) {
+  const cands = ffmpegCandidates();
+  const permanent = path.join(ffBinDir(), FF_NAME);
+  const inTemp = p => { const t = (os.tmpdir() || '').toLowerCase(); return p.toLowerCase().startsWith(t); };
+
+  for (const c of cands) {
+    if (!isUsableFf(c)) continue;
+    // الموجود في %TEMP% قد يُحجب — نجرّبه أولاً ثم ننسخه
+    const r = await ffmpegWorks(c);
+    if (r.ok) {
+      if (inTemp(c) || path.resolve(c).toLowerCase() !== path.resolve(permanent).toLowerCase()) {
+        const perm = installFfmpegPermanent(c);
+        if (perm) {
+          const r2 = await ffmpegWorks(perm);
+          if (r2.ok) { FFMPEG = perm; return { ok: true, path: perm, version: r2.version, note: 'ثُبّت في مجلد دائم' }; }
+        }
+      }
+      FFMPEG = c;
+      return { ok: true, path: c, version: r.version, note: 'يعمل من مكانه' };
+    }
+  }
+  FFMPEG = null;
+  return { ok: false, path: '', version: '', note: 'لم يُعثر على ffmpeg صالح للتنفيذ' };
+}
+
+// تشغيل ffmpeg بمسار مطلق وبمجلد عمل آمن (يمنع مشاكل %TEMP% والصلاحيات)
+function spawnFfmpeg(args, opts) {
+  const o = Object.assign({ windowsHide: true, cwd: tmpDir(), stdio: ['ignore', 'pipe', 'pipe'] }, opts || {});
+  if (!FFMPEG) return null;
+  try { return spawn(FFMPEG, args, o); } catch (e) { return null; }
+}
+
+async function ffmpegStatus() {
+  const found = ffmpegCandidates().filter(isUsableFf);
+  let version = '';
+  if (FFMPEG) { const r = await ffmpegWorks(FFMPEG, 8000); if (r.ok) version = r.version; else FFMPEG = null; }
+  return {
+    ok: !!FFMPEG,
+    path: FFMPEG || '',
+    version,
+    permanentDir: ffBinDir(),
+    foundCount: found.length,
+    searched: ffmpegCandidates().slice(0, 12)
+  };
 }
 
 // ------------------------------------------------------------------ الإعدادات
@@ -169,7 +294,7 @@ function run(exe, args, timeoutMs) {
 
 function ffmpegRun(args, timeoutMs) {
   if (!FFMPEG) return Promise.resolve({ code: -1, out: 'ffmpeg غير موجود' });
-  return run(FFMPEG, ['-hide_banner', '-nostdin'].concat(args), timeoutMs);
+  return run(FFMPEG, ['-hide_banner', '-nostdin'].concat(args), timeoutMs, tmpDir());
 }
 
 // ------------------------------------------------------------------ الأجهزة والمرمّزات
@@ -211,7 +336,8 @@ function startPreview(s) {
   }
   const args = previewArgs(use);
   try {
-    previewProc = spawn(FFMPEG, args, { windowsHide: true });
+    previewProc = spawnFfmpeg(args);
+    if (!previewProc) return { ok: false, error: 'ffmpeg غير قابل للتنفيذ — افتح لوحة الإصلاح' };
   } catch (e) { return { ok: false, error: 'تعذّر تشغيل ffmpeg: ' + e.message }; }
 
   let err = '';
@@ -287,7 +413,7 @@ function restartMax() {
 
 function spawnLive(args) {
   let p;
-  try { p = spawn(FFMPEG, args, { windowsHide: true }); }
+  try { p = spawnFfmpeg(args); if (!p) return res({ ok: false, error: 'ffmpeg غير قابل للتنفيذ' }); }
   catch (e) { return null; }
 
   p.on('close', (code) => {
@@ -849,6 +975,37 @@ public class WP {
             liveProc ? 'البث مستمر على يوتيوب ✓' : 'التطبيق يعمل في الخلفية');
     return { ok: true };
   });
+  // ---------------------------------------------------------------- ffmpeg (لوحة الإصلاح)
+  ipcMain.handle('ffmpeg:status', async () => ffmpegStatus());
+
+  ipcMain.handle('ffmpeg:retry', async () => {
+    const r = await resolveFfmpeg(true);
+    if (win && !win.isDestroyed()) win.webContents.send('ffmpeg-ready', Object.assign({}, r, { permanentDir: ffBinDir() }));
+    return Object.assign({ ok: r.ok, path: r.path, version: r.version, permanentDir: ffBinDir(), note: r.note }, await ffmpegStatus());
+  });
+
+  ipcMain.handle('ffmpeg:pick', async () => {
+    const d = await dialog.showOpenDialog(win, {
+      title: 'اختر ملف ffmpeg.exe',
+      properties: ['openFile'],
+      filters: [{ name: 'ffmpeg', extensions: IS_WIN ? ['exe'] : ['*'] }]
+    });
+    if (d.canceled || !d.filePaths || !d.filePaths[0]) return { ok: false, canceled: true };
+    const src = d.filePaths[0];
+    const perm = installFfmpegPermanent(src);
+    const target = perm || src;
+    const v = await ffmpegWorks(target, 15000);
+    if (v.ok) FFMPEG = target;
+    if (win && !win.isDestroyed()) win.webContents.send('ffmpeg-ready', { ok: v.ok, path: target, version: v.version, permanentDir: ffBinDir() });
+    return { ok: v.ok, path: target, version: v.version, reason: v.reason, permanentDir: ffBinDir() };
+  });
+
+  ipcMain.handle('ffmpeg:openDir', async () => {
+    const d = ffBinDir();
+    try { await shell.openPath(d); } catch (e) {}
+    return { ok: true, dir: d };
+  });
+
   ipcMain.handle('app:quit', async () => {
     quitting = true;
     app.quit();
@@ -865,7 +1022,14 @@ if (!gotLock) {
   app.on('second-instance', () => showMainWindow());
 
   app.whenReady().then(() => {
-    FFMPEG = findFfmpeg();
+    // اكتشاف مبدئي سريع (بلا تنفيذ) حتى تعمل الواجهة فوراً
+    for (const c of ffmpegCandidates()) { if (isUsableFf(c)) { FFMPEG = c; break; } }
+    // ثم تحقق فعلي + تثبيت دائم في الخلفية
+    setTimeout(() => {
+      resolveFfmpeg().then(r => {
+        if (win && !win.isDestroyed()) win.webContents.send('ffmpeg-ready', Object.assign({}, r, { permanentDir: ffBinDir() }));
+      }).catch(() => {});
+    }, 1200);
     loadSettings();
     ensureAssets();
     Menu.setApplicationMenu(null);

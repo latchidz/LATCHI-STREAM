@@ -44,6 +44,23 @@
   .brand span{display:block;font-size:11px;color:var(--dim);margin-top:1px}
   .grow{flex:1}
 
+  /* ---------------- لوحة إصلاح ffmpeg ---------------- */
+  #ffPanel{position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;
+    background:rgba(4,7,12,.86);backdrop-filter:blur(6px);padding:24px}
+  #ffPanel.on{display:flex}
+  #ffPanel .card{max-width:680px;width:100%;background:#0f1520;border:1px solid #2a3a52;border-radius:16px;
+    padding:24px 26px;box-shadow:0 24px 70px rgba(0,0,0,.6);max-height:88vh;overflow:auto}
+  #ffPanel h3{margin:0 0 6px;font-size:19px;color:#ffb4b4;display:flex;align-items:center;gap:10px}
+  #ffPanel .sub{color:#8fa6c4;font-size:13px;line-height:1.9;margin:0 0 16px}
+  #ffPanel .row{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0 6px}
+  #ffPanel details{background:#0b1119;border:1px solid #22314a;border-radius:10px;padding:12px 14px;margin-top:14px}
+  #ffPanel summary{cursor:pointer;color:#9fc3ff;font-size:13px;font-weight:600}
+  #ffPanel details p{color:#9bb0c9;font-size:12.5px;line-height:2;margin:10px 0 0}
+  #ffPanel code{background:#060a10;border:1px solid #1e2b40;border-radius:5px;padding:2px 6px;
+    color:#8ee0b0;font-size:11.5px;direction:ltr;display:inline-block}
+  #ffPanel ol{color:#9bb0c9;font-size:12.5px;line-height:2;padding-inline-start:18px;margin:8px 0 0}
+  #ffPanel .meta{font-size:11.5px;color:#6d829e;margin-top:14px;line-height:1.9;direction:ltr;text-align:left;word-break:break-all}
+
   .chip{
     display:inline-flex;align-items:center;gap:6px;
     padding:5px 10px;border-radius:999px;font-size:11.5px;
@@ -291,7 +308,7 @@
     <div class="logo">L</div>
     <div class="brand">
       <b>LATCHI STREAM</b>
-      <span id="verLine">الإصدار 3.1.0</span>
+      <span id="verLine">الإصدار 3.2.0</span>
     </div>
     <div class="grow"></div>
     <span class="chip" id="chipFfmpeg"><i class="dot"></i> ffmpeg</span>
@@ -603,6 +620,39 @@
     <h2>LATCHI STREAM</h2>
     <p class="hint" id="gateHint">جارٍ التحميل…</p>
     <div id="gateActions"></div>
+  </div>
+</div>
+
+<div id="ffPanel">
+  <div class="card">
+    <h3>⚠ توقّف ffmpeg</h3>
+    <p class="sub">
+      البرنامج وجد ملف <code>ffmpeg.exe</code> لكن ويندوز منعه من التنفيذ — هذا سبب «المعاينة تُفتح وتُغلق فوراً»
+      وسبب فشل البث. الحل التلقائي جاهز: اضغط <b>إعادة الفحص</b>.
+    </p>
+    <div class="row">
+      <button class="btn green" id="ffRetry">إعادة الفحص والتثبيت</button>
+      <button class="btn blue" id="ffPick">اختيار ffmpeg.exe يدوياً</button>
+      <button class="btn" id="ffOpenDir">فتح مجلد التثبيت</button>
+    </div>
+    <div class="row">
+      <button class="btn" id="ffSkip" style="opacity:.8">متابعة بلا ffmpeg (لن يعمل البث)</button>
+    </div>
+    <details>
+      <summary>لماذا يحدث هذا؟ (الحل الجذري)</summary>
+      <p>
+        في النسخة <b>Portable</b> يُفكّ ffmpeg داخل <code>%TEMP%</code>، وWindows Defender (سياسة ASR)
+        يمنع تشغيل أي برنامج من هناك ⇒ <code>spawn ENOENT</code> رغم أن الملف موجود.
+      </p>
+      <ol>
+        <li>استعمل نسخة <b>ZIP</b> بدل Portable، وفُكّها في مسار ثابت مثل <code>D:\LATCHI</code> — المسار لا يتغيّر أبداً.</li>
+        <li>البرنامج ينسخ ffmpeg تلقائياً إلى مجلد دائم داخل بياناتك:
+            <code>%APPDATA%\latchi-stream\bin</code> ويشغّله من هناك.</li>
+        <li>إن بقي المنع: أضف استثناء في Windows Security ← الحماية من الفيروسات ← الاستثناءات ← المجلد أعلاه.</li>
+        <li>بديل: نزّل ffmpeg يدوياً وفُكّه في <code>C:\ffmpeg\bin</code> ثم اضغط «اختيار ffmpeg.exe يدوياً».</li>
+      </ol>
+    </details>
+    <div class="meta" id="ffMeta"></div>
   </div>
 </div>
 

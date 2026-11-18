@@ -36,5 +36,12 @@ contextBridge.exposeInMainWorld('latchi', {
   onStreamEnded:   (cb)    => ipcRenderer.on('stream-ended', (e, d) => cb(d)),
   onStreamRestarting: (cb) => ipcRenderer.on('stream-restarting', (e, d) => cb(d)),
   onStreamRestarted:  (cb) => ipcRenderer.on('stream-restarted', (e, d) => cb(d)),
-  onBrowserEsc:    (cb)    => ipcRenderer.on('browser-esc', (e, d) => cb(d))
+  onBrowserEsc:    (cb)    => ipcRenderer.on('browser-esc', (e, d) => cb(d)),
+
+  // ffmpeg
+  ffmpegStatus:    ()      => ipcRenderer.invoke('ffmpeg:status'),
+  ffmpegRetry:     ()      => ipcRenderer.invoke('ffmpeg:retry'),
+  ffmpegPick:      ()      => ipcRenderer.invoke('ffmpeg:pick'),
+  ffmpegOpenDir:   ()      => ipcRenderer.invoke('ffmpeg:openDir'),
+  onFfmpegReady:   (cb)    => ipcRenderer.on('ffmpeg-ready', (e, d) => cb(d))
 });
