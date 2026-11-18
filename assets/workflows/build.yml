@@ -1,0 +1,139 @@
+name: Build LATCHI STREAM
+
+# بناء تلقائي على GitHub — لا حاجة لبناء محلي.
+# التشغيل: Actions → Build LATCHI STREAM → Run workflow
+# المتغير BUNDLE_FFMPEG = 1 يجعل ffmpeg.exe مرفقاً + الحزمة محمولة (يُنصح به)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_ffmpeg:
+        description: 'إرفاق ffmpeg.exe داخل الحزمة المحمولة'
+        type: choice
+        options: ['1', '0']
+        default: '1'
+      publish_release:
+        description: 'إنشاء Release على GitHub'
+        type: boolean
+        default: true
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # الـ workflow يعيش في assets/workflows حتى لا يُحذف من مساحة العمل،
+      # ويُنسخ هنا عند التشغيل. الـ workflow الأساسي هو نسخة من هذا الملف نفسه.
+      - name: Self-heal workflow file
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .github/workflows | Out-Null
+          if (Test-Path assets/workflows/build.yml) {
+            Copy-Item assets/workflows/build.yml .github/workflows/build.yml -Force
+          }
+          Write-Host "workflow ready"
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.18.1'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Syntax check
+        shell: pwsh
+        run: |
+          node --check main.js
+          node --check preload.js
+          node --check core/LatchiCore.js
+          node --check ui/app.js
+          Write-Host "syntax OK"
+
+      - name: Unit tests (core)
+        run: node tests/core.test.js
+
+      - name: Download ffmpeg
+        if: ${{ github.event_name == 'push' || inputs.bundle_ffmpeg == '1' }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path resources/ffmpeg | Out-Null
+          $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile ff.zip -UseBasicParsing
+          Expand-Archive -Path ff.zip -DestinationPath ffx -Force
+          $exe = Get-ChildItem ffx -Filter ffmpeg.exe -Recurse | Select-Object -First 1
+          if (-not $exe) { throw 'ffmpeg.exe not found in archive' }
+          Copy-Item $exe.FullName resources/ffmpeg/ffmpeg.exe -Force
+          Remove-Item ff.zip -Force -ErrorAction SilentlyContinue
+          Remove-Item ffx -Recurse -Force -ErrorAction SilentlyContinue
+          $size = (Get-Item resources/ffmpeg/ffmpeg.exe).Length
+          Write-Host "ffmpeg.exe = $size bytes"
+          if ($size -lt 1000000) { throw 'ffmpeg.exe too small' }
+
+      - name: Remove ffmpeg from resources when not bundling
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.bundle_ffmpeg == '0' }}
+        shell: pwsh
+        run: |
+          Remove-Item resources/ffmpeg/ffmpeg.exe -Force -ErrorAction SilentlyContinue
+
+      # ---------- مخرجات صغيرة أولاً ----------
+      - name: Build NSIS installer (x64)
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Zip the NSIS unpacked folder
+        shell: pwsh
+        run: |
+          if (Test-Path dist/win-unpacked) {
+            Compress-Archive -Path dist/win-unpacked/* -DestinationPath dist/LATCHI-STREAM-3.0.1-win-x64.zip -Force
+            Write-Host "zip: $((Get-Item dist/LATCHI-STREAM-3.0.1-win-x64.zip).Length) bytes"
+          }
+
+      - name: Build portable (x64)
+        run: npx electron-builder --win portable --x64 --publish never
+
+      - name: Build ia32 installer
+        continue-on-error: true
+        run: npx electron-builder --win nsis --ia32 --publish never
+
+      - name: List artifacts
+        shell: pwsh
+        run: Get-ChildItem dist -File | Select-Object Name, @{N='MB';E={[math]::Round($_.Length/1MB,2)}} | Format-Table -AutoSize
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: LATCHI-STREAM-v3.0.1-windows
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.yml
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish release
+        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release) }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || 'latchi-stream-v3.0.0' }}
+          name: 'LATCHI STREAM v3.0.1'
+          draft: false
+          generate_release_notes: true
+          files: |
+            dist/*.zip
+            dist/*.exe
+            dist/*.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
