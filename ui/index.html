@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>LATCHI STREAM</title>
+<style>
+  :root{
+    --bg:#070b12; --bg2:#0d1421; --panel:#111a29; --panel2:#16223a;
+    --line:#1e2d47; --line2:#2a3d5e;
+    --txt:#e8eefc; --dim:#8ba0c4; --dim2:#5f7392;
+    --acc:#3b82f6; --acc2:#22d3ee; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444;
+    --live:#ef4444;
+  }
+  *{box-sizing:border-box; -webkit-user-select:none; user-select:none}
+  html,body{height:100%;margin:0}
+  body{
+    background:radial-gradient(1200px 700px at 80% -10%, #16233c 0%, #070b12 60%) fixed, var(--bg);
+    color:var(--txt);
+    font-family:"Segoe UI","Tahoma",system-ui,sans-serif;
+    font-size:14px; overflow:hidden;
+  }
+  button{font-family:inherit}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:#0a1018}
+  ::-webkit-scrollbar-thumb{background:#24354f;border-radius:6px}
+  ::-webkit-scrollbar-thumb:hover{background:#33507a}
+
+  /* ---------- الهيكل ---------- */
+  #app{display:flex;flex-direction:column;height:100vh}
+
+  header{
+    display:flex;align-items:center;gap:14px;
+    padding:10px 16px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#101a2a,#0a1220);
+    flex:0 0 auto;
+  }
+  .logo{
+    width:38px;height:38px;border-radius:11px;display:grid;place-items:center;
+    background:linear-gradient(135deg,#3b82f6,#22d3ee);
+    box-shadow:0 0 22px rgba(59,130,246,.45);
+    font-weight:800;font-size:17px;color:#04121f;
+  }
+  .brand b{font-size:16px;letter-spacing:.4px}
+  .brand span{display:block;font-size:11px;color:var(--dim);margin-top:1px}
+  .grow{flex:1}
+
+  .chip{
+    display:inline-flex;align-items:center;gap:6px;
+    padding:5px 10px;border-radius:999px;font-size:11.5px;
+    background:#0e1727;border:1px solid var(--line);color:var(--dim);
+    white-space:nowrap;
+  }
+  .chip.ok{color:#9ff0bd;border-color:#1d5f3c;background:#0b1f16}
+  .chip.bad{color:#ffb4b4;border-color:#6b2222;background:#200d0d}
+  .chip.warn{color:#ffd79a;border-color:#6b4a15;background:#1e1607}
+  .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:0 0 auto}
+  .dot.pulse{animation:pulse 1.4s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+  main{flex:1;display:grid;grid-template-columns:330px 1fr 340px;gap:0;min-height:0}
+  .col{overflow-y:auto;padding:12px;min-height:0}
+  .col.left{border-left:1px solid var(--line);background:linear-gradient(180deg,#0b1320,#080e18)}
+  .col.right{border-right:1px solid var(--line);background:linear-gradient(180deg,#0b1320,#080e18)}
+  .col.center{display:flex;flex-direction:column;gap:10px;padding:12px;overflow:hidden}
+
+  .card{
+    background:linear-gradient(180deg,var(--panel),#0e1626);
+    border:1px solid var(--line);border-radius:12px;
+    padding:11px 12px;margin-bottom:10px;
+  }
+  .card h3{
+    margin:0 0 9px;font-size:12px;font-weight:700;color:#b9cdea;
+    text-transform:uppercase;letter-spacing:.7px;display:flex;align-items:center;gap:7px;
+  }
+  .card h3 .n{
+    width:18px;height:18px;border-radius:6px;background:#1b2b45;color:#7fb0ff;
+    display:grid;place-items:center;font-size:10.5px;flex:0 0 auto;
+  }
+
+  .row{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+  .row:last-child{margin-bottom:0}
+  label.lbl{font-size:11.5px;color:var(--dim);flex:0 0 auto;min-width:64px}
+
+  select,input[type=text],input[type=number]{
+    width:100%;background:#0a1220;border:1px solid var(--line2);color:var(--txt);
+    border-radius:8px;padding:7px 9px;font-size:12.5px;font-family:inherit;
+    -webkit-user-select:text;user-select:text;outline:none;
+  }
+  select:focus,input:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(59,130,246,.15)}
+  input[type=range]{width:100%;accent-color:var(--acc)}
+
+  .seg{display:flex;gap:6px;flex-wrap:wrap}
+  .seg button{
+    flex:1 1 auto;min-width:56px;padding:7px 6px;border-radius:8px;cursor:pointer;
+    background:#0d1728;border:1px solid var(--line2);color:var(--dim);
+    font-size:12px;font-weight:600;transition:.15s;
+  }
+  .seg button:hover{border-color:#3a5a8a;color:#cfe0f8}
+  .seg button.on{
+    background:linear-gradient(135deg,#2563eb,#3b82f6);color:#fff;border-color:#4b8ef8;
+    box-shadow:0 3px 14px rgba(59,130,246,.35);
+  }
+  .seg.small button{font-size:11px;padding:6px 4px;min-width:44px}
+
+  .btn{
+    display:inline-flex;align-items:center;justify-content:center;gap:7px;
+    padding:9px 14px;border-radius:9px;cursor:pointer;font-size:13px;font-weight:700;
+    background:#16233a;border:1px solid var(--line2);color:var(--txt);
+    transition:.15s;white-space:nowrap;
+  }
+  .btn:hover{background:#1d2f4d;border-color:#3a5a8a}
+  .btn:active{transform:translateY(1px)}
+  .btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+  .btn.full{width:100%}
+  .btn.blue{background:linear-gradient(135deg,#1d4ed8,#3b82f6);border-color:#4b8ef8;box-shadow:0 4px 16px rgba(37,99,235,.35)}
+  .btn.blue:hover{background:linear-gradient(135deg,#2458e8,#4b8ef8)}
+  .btn.red{background:linear-gradient(135deg,#b91c1c,#ef4444);border-color:#f87171;box-shadow:0 4px 16px rgba(239,68,68,.3)}
+  .btn.red:hover{background:linear-gradient(135deg,#d02020,#f65c5c)}
+  .btn.green{background:linear-gradient(135deg,#15803d,#22c55e);border-color:#4ade80;box-shadow:0 4px 16px rgba(34,197,94,.3)}
+  .btn.green:hover{background:linear-gradient(135deg,#189a4a,#34d16a)}
+  .btn.ghost{background:transparent}
+  .btn.sm{padding:6px 10px;font-size:11.5px;border-radius:7px}
+  .btn.spin{pointer-events:none}
+  .spinner{
+    width:14px;height:14px;border-radius:50%;flex:0 0 auto;
+    border:2px solid rgba(255,255,255,.28);border-top-color:#fff;
+    animation:spin .7s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ---------- المعاينة ---------- */
+  .previewWrap{
+    position:relative;flex:1;min-height:0;border-radius:14px;overflow:hidden;
+    background:#05080e;border:1px solid var(--line);
+    display:grid;place-items:center;
+  }
+  #prevImg{
+    max-width:100%;max-height:100%;display:block;object-fit:contain;
+    image-rendering:auto;
+  }
+  #livePanel{
+    position:absolute;inset:0;display:none;place-content:center;justify-items:center;
+    gap:14px;padding:26px;text-align:center;
+    background:radial-gradient(circle at 50% 40%, rgba(239,68,68,.10), transparent 60%);
+  }
+  #livePanel.on{display:grid}
+  .lpHero{display:flex;align-items:center;gap:10px;font-size:16px;color:#ffe4e4}
+  .lpDot{width:11px;height:11px;border-radius:50%;background:#ef4444;box-shadow:0 0 14px #ef4444;animation:pulse 1.3s infinite}
+  .lpRows{display:grid;gap:7px;min-width:270px}
+  .lpRow{display:flex;justify-content:space-between;gap:16px;font-size:12.5px;
+    background:rgba(255,255,255,.035);border:1px solid var(--line);border-radius:8px;padding:7px 11px}
+  .lpRow span{color:var(--dim)}
+  .lpRow b{color:#dbe9ff;font-variant-numeric:tabular-nums}
+  .lpHint{font-size:11.5px;color:#6b83a5;margin:0;line-height:1.9;max-width:360px}
+
+  #prevIdle{
+    position:absolute;inset:0;display:grid;place-items:center;text-align:center;
+    color:#3d5678;font-size:13px;line-height:2;padding:20px;
+  }
+  #prevIdle .big{font-size:44px;margin-bottom:6px;opacity:.5}
+
+  /* طبقة القص */
+  #cropLayer{position:absolute;inset:0;display:none}
+  #cropLayer.on{display:block}
+  #prevImgWrap{position:relative;display:inline-block;line-height:0;overflow:hidden}
+  #prevBannerLayer{
+    position:absolute;inset:0;pointer-events:none;display:none;background-size:cover;
+    background-position:center;
+  }
+  #prevTitleLayer{
+    position:absolute;pointer-events:none;display:none;
+    padding:.28em .55em;border-radius:.18em;font-weight:800;white-space:nowrap;
+    text-shadow:0 2px 8px rgba(0,0,0,.7);line-height:1.25;max-width:92%;
+    overflow:hidden;text-overflow:ellipsis;
+  }
+  .shade{position:absolute;background:rgba(0,0,0,.55);pointer-events:none}
+  #cropBox{
+    position:absolute;border:2px solid var(--acc2);cursor:move;
+    box-shadow:0 0 0 9999px rgba(0,0,0,.55) inset, 0 0 16px rgba(34,211,238,.5);
+    box-sizing:border-box;
+  }
+  #cropBox::before,#cropBox::after{
+    content:'';position:absolute;background:rgba(255,255,255,.35);
+  }
+  #cropBox::before{left:0;right:0;top:50%;height:1px}
+  #cropBox::after{top:0;bottom:0;left:50%;width:1px}
+  .handle{
+    position:absolute;width:12px;height:12px;background:#22d3ee;border-radius:3px;
+    border:1px solid #0a1220;
+  }
+
+  .vbar{
+    display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+    padding:8px 10px;border-radius:12px;border:1px solid var(--line);
+    background:linear-gradient(180deg,#101a2a,#0b1421);flex:0 0 auto;
+  }
+  .statLine{display:flex;gap:14px;font-size:11.5px;color:var(--dim);flex-wrap:wrap}
+  .statLine b{color:#cfe0f8;font-variant-numeric:tabular-nums}
+
+  /* ---------- البانر ---------- */
+  .bannerBox{
+    position:relative;border-radius:9px;overflow:hidden;border:1px solid var(--line2);
+    background:#060a11;cursor:pointer;line-height:0;
+  }
+  .bannerBox img{width:100%;display:block}
+  .bannerBox .ov{
+    position:absolute;inset:0;display:grid;place-items:center;
+    background:rgba(4,8,14,.55);opacity:0;transition:.2s;
+    font-size:11.5px;color:#dbe9ff;line-height:1.6;text-align:center;padding:8px;
+  }
+  .bannerBox:hover .ov{opacity:1}
+
+  /* ---------- المتصفح المدمج ---------- */
+  #browserArea{
+    position:absolute;inset:0;background:#080d15;display:none;
+    grid-template-rows:auto 1fr;z-index:30;
+  }
+  #browserArea.on{display:grid}
+  .browserBar{
+    display:flex;gap:8px;align-items:center;padding:8px 10px;
+    background:#0d1626;border-bottom:1px solid var(--line);
+  }
+  .browserBar input{flex:1}
+  #browserStage{position:relative;background:#fff;min-height:0}
+  #browserStage webview{width:100%;height:100%;display:inline-flex}
+  #browserHint{
+    position:absolute;inset:0;display:grid;place-items:center;color:#5e779c;
+    background:#080d15;font-size:13px;text-align:center;line-height:2;padding:24px;
+  }
+
+  /* ---------- منبثقات ---------- */
+  #modal{
+    position:fixed;inset:0;background:rgba(3,6,12,.78);backdrop-filter:blur(4px);
+    display:none;place-items:center;z-index:100;
+  }
+  #modal.on{display:grid}
+  .sheet{
+    width:min(560px,92vw);max-height:88vh;overflow-y:auto;
+    background:linear-gradient(180deg,#131f33,#0c1523);
+    border:1px solid var(--line2);border-radius:16px;padding:18px;
+    box-shadow:0 30px 90px rgba(0,0,0,.7);
+  }
+  .sheet h2{margin:0 0 4px;font-size:16px}
+  .sheet p.hint{margin:0 0 14px;font-size:12px;color:var(--dim);line-height:1.8}
+
+  /* ---------- السجل ---------- */
+  #log{
+    height:104px;overflow-y:auto;background:#050a11;border:1px solid var(--line);
+    border-radius:9px;padding:8px 10px;font-family:Consolas,monospace;font-size:11px;
+    color:#7d93b4;line-height:1.65;-webkit-user-select:text;user-select:text;
+  }
+  #log .t{color:#4a6488}
+  #log .ok{color:#6ee7a0}
+  #log .bad{color:#fca5a5}
+  #log .warn{color:#fcd34d}
+  #log div{word-break:break-word}
+
+  .toastWrap{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:200;display:flex;flex-direction:column;gap:8px;align-items:center}
+  .toast{
+    padding:10px 18px;border-radius:11px;font-size:13px;font-weight:600;
+    background:#16233a;border:1px solid var(--line2);color:var(--txt);
+    box-shadow:0 12px 40px rgba(0,0,0,.6);animation:tin .25s ease-out;
+    max-width:min(560px,90vw);text-align:center;line-height:1.6;
+  }
+  .toast.ok{background:#0d2a1c;border-color:#1d6b42;color:#a7f3c9}
+  .toast.bad{background:#2a1010;border-color:#7a2626;color:#fecaca}
+  .toast.warn{background:#2a1f08;border-color:#7a5a15;color:#fde68a}
+  @keyframes tin{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+
+  .liveBadge{
+    display:none;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;
+    background:#3b0d0d;border:1px solid #7f1d1d;color:#ff9d9d;font-size:11.5px;font-weight:700;
+  }
+  .liveBadge.on{display:inline-flex}
+  .liveBadge .dot{background:#ef4444;box-shadow:0 0 8px #ef4444}
+
+  #gate{position:fixed;inset:0;background:rgba(4,8,14,.94);display:grid;place-items:center;z-index:150}
+  #gate .sheet{width:min(500px,92vw);text-align:center}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ============ الشريط العلوي ============ -->
+  <header>
+    <div class="logo">L</div>
+    <div class="brand">
+      <b>LATCHI STREAM</b>
+      <span id="verLine">الإصدار 3.0.0</span>
+    </div>
+    <div class="grow"></div>
+    <span class="chip" id="chipFfmpeg"><i class="dot"></i> ffmpeg</span>
+    <span class="chip" id="chipKey"><i class="dot"></i> مفتاح البث</span>
+    <span class="chip" id="chipAudio"><i class="dot"></i> صوت النظام</span>
+    <span class="liveBadge" id="liveBadge"><i class="dot pulse"></i> مباشر <b id="liveTime" dir="ltr">00:00:00</b></span>
+    <button class="btn sm ghost" id="btnBrowserTop">المتصفح المدمج</button>
+  </header>
+
+  <main>
+    <!-- ============ العمود الأيسر ============ -->
+    <section class="col left">
+
+      <div class="card">
+        <h3><span class="n">1</span> جودة البث</h3>
+        <div class="seg" id="presetSeg">
+          <button data-preset="saver">موفّر</button>
+          <button data-preset="balanced" class="on">متوازن</button>
+          <button data-preset="high">عالي</button>
+          <button data-preset="portrait">9:16</button>
+        </div>
+        <div class="row" style="margin-top:9px">
+          <label class="lbl">الدقة</label>
+          <select id="selRes" dir="ltr" style="text-align:right">
+            <option value="1280x720">1280 × 720</option>
+            <option value="854x480">854 × 480</option>
+            <option value="1920x1080">1920 × 1080</option>
+            <option value="720x1280">720 × 1280 (عمودي)</option>
+          </select>
+        </div>
+        <div class="row">
+          <label class="lbl">الإطارات</label>
+          <select id="selFps">
+            <option value="15">15</option><option value="24">24</option>
+            <option value="30">30</option><option value="60">60</option>
+          </select>
+          <label class="lbl" style="min-width:auto">البت</label>
+          <select id="selBitrate">
+            <option value="900k">900k</option><option value="2500k">2500k</option>
+            <option value="4000k">4000k</option><option value="6000k">6000k</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span class="n">2</span> المصدر</h3>
+        <div class="seg small" id="modeSeg">
+          <button data-mode="desktop" class="on">كل الشاشة</button>
+          <button data-mode="window">نافذة</button>
+        </div>
+        <div class="row" style="margin-top:9px">
+          <select id="selWindow" disabled>
+            <option value="">— اختر نافذة —</option>
+          </select>
+        </div>
+        <div class="row">
+          <button class="btn sm full" id="btnRefreshWin">تحديث قائمة النوافذ</button>
+        </div>
+        <div class="row">
+          <button class="btn sm full" id="btnPickWinMouse">اختيار بالماوس</button>
+        </div>
+        <div class="row">
+          <label class="lbl" style="min-width:auto;display:flex;align-items:center;gap:7px;cursor:pointer">
+            <input type="checkbox" id="chkMouse" checked style="width:auto">
+            إظهار مؤشر الفأرة في البث
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span class="n">3</span> صوت النظام</h3>
+        <div class="row">
+          <select id="selAudio"><option value="">—</option></select>
+        </div>
+        <div class="row">
+          <button class="btn sm full" id="btnRefreshAudio">تحديث أجهزة الصوت</button>
+        </div>
+        <p style="margin:6px 0 0;font-size:11px;color:#7b8fb0;line-height:1.7">
+          الميكروفون ممنوع. إن لم يظهر جهاز فشغّل
+          <b>Stereo Mix</b> من إعدادات الصوت في ويندوز.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3><span class="n">4</span> القص والزوم</h3>
+        <div class="row">
+          <label class="lbl">النسبة</label>
+        </div>
+        <div class="seg small" id="ratioSeg">
+          <button data-ratio="free" class="on">حر</button>
+          <button data-ratio="16:9">16:9</button>
+          <button data-ratio="9:16">9:16</button>
+          <button data-ratio="1:1">1:1</button>
+          <button data-ratio="4:3">4:3</button>
+        </div>
+        <div class="row" style="margin-top:9px">
+          <label class="lbl">الزوم</label>
+          <input type="range" id="rngZoom" min="100" max="400" value="100" step="5">
+          <b id="lblZoom" dir="ltr" style="font-size:11.5px;color:#8fd7ff;min-width:42px;text-align:left">1.0×</b>
+        </div>
+        <div class="row">
+          <button class="btn sm" id="btnResetCrop" style="flex:1">ملء الشاشة</button>
+          <button class="btn sm green" id="btnSaveCrop" style="flex:1">حفظ الاختيار</button>
+        </div>
+        <p style="margin:6px 0 0;font-size:11px;color:#7b8fb0;line-height:1.7">
+          اسحب على المعاينة لرسم منطقة القص. الحفظ يطبّقها على البث.
+        </p>
+      </div>
+
+    </section>
+
+    <!-- ============ الوسط: المعاينة ============ -->
+    <section class="col center">
+      <div class="previewWrap">
+        <div id="prevImgWrap">
+          <img id="prevImg" alt="" style="display:none">
+          <div id="prevBannerLayer"></div>
+          <div id="prevTitleLayer"></div>
+          <div id="cropLayer">
+            <div id="cropBox">
+              <div class="handle" data-h="nw" style="left:-6px;top:-6px;cursor:nwse-resize"></div>
+              <div class="handle" data-h="ne" style="right:-6px;top:-6px;cursor:nesw-resize"></div>
+              <div class="handle" data-h="sw" style="left:-6px;bottom:-6px;cursor:nesw-resize"></div>
+              <div class="handle" data-h="se" style="right:-6px;bottom:-6px;cursor:nwse-resize"></div>
+            </div>
+          </div>
+        </div>
+        <div id="livePanel">
+          <div class="lpHero">
+            <span class="lpDot"></span>
+            <b>البث يعمل الآن على يوتيوب</b>
+          </div>
+          <div class="lpRows">
+            <div class="lpRow"><span>العنوان</span><b id="liveStatTitle">—</b></div>
+            <div class="lpRow"><span>الدقة</span><b id="liveStatRes" dir="ltr">—</b></div>
+            <div class="lpRow"><span>البِتريت</span><b id="liveStatBr" dir="ltr">—</b></div>
+            <div class="lpRow"><span>الإطارات</span><b id="liveStatFps" dir="ltr">—</b></div>
+            <div class="lpRow"><span>المدة</span><b id="liveStatTime" dir="ltr">—</b></div>
+          </div>
+          <p class="lpHint">تُعالج الشاشة وتُرسل مباشرة إلى يوتيوب. البانر يظهر في أول البث فقط.</p>
+        </div>
+
+        <div id="prevIdle">
+          <div>
+            <div class="big"><svg width="72" height="72" viewBox="0 0 24 24" fill="none"
+                 stroke="#3d5678" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3.5" width="20" height="13.5" rx="2"/>
+              <path d="M8 21h8M12 17v4"/>
+            </svg></div>
+            اضغط <b>بدء المعاينة</b> لرؤية شاشتك هنا<br>
+            <span style="font-size:11.5px;color:#2f4763">المعاينة مخففة ولا تستهلك الجهاز</span>
+          </div>
+        </div>
+
+        <!-- المتصفح المدمج -->
+        <div id="browserArea">
+          <div class="browserBar">
+            <input type="text" id="browserUrl" placeholder="https://studio.youtube.com" spellcheck="false">
+            <button class="btn sm" id="btnBrowserGo">فتح</button>
+            <button class="btn sm ghost" id="btnBrowserClose">إغلاق</button>
+          </div>
+          <div id="browserStage">
+            <div id="browserHint">
+              المتصفح المدمج — كل شيء داخل التطبيق<br>
+              <span style="font-size:11.5px;color:#456486">أدخل رابط المنصة ثم اضغط «فتح». للبث منها اختر «نافذة» كمصدر.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="vbar">
+        <button class="btn green" id="btnPrevStart">بدء المعاينة</button>
+        <button class="btn red" id="btnPrevStop" disabled>إيقاف</button>
+        <button class="btn" id="btnPrevSave">حفظ المعاينة</button>
+        <div class="grow"></div>
+        <div class="statLine">
+          <span>FPS <b id="stFps" dir="ltr">—</b></span>
+          <span>مُسقَط <b id="stDrop" dir="ltr">—</b></span>
+          <span>المدة <b id="stTime" dir="ltr">—</b></span>
+        </div>
+      </div>
+
+      <div class="vbar" style="gap:10px">
+        <button class="btn blue" id="btnStreamStart" style="min-width:210px">بدء البث إلى يوتيوب</button>
+        <button class="btn red" id="btnStreamStop" disabled style="min-width:130px">إيقاف البث</button>
+        <button class="btn" id="btnKeyTest">اختبار المفتاح</button>
+        <div class="grow"></div>
+        <button class="btn sm" id="btnFull">شاشة كاملة</button>
+      </div>
+
+      <div id="log"></div>
+    </section>
+
+    <!-- ============ العمود الأيمن ============ -->
+    <section class="col right">
+
+      <div class="card">
+        <h3><span class="n">5</span> بانر البث</h3>
+        <div class="bannerBox" id="bannerBox" title="اضغط لتغيير صورة البانر">
+          <img id="bannerImg" alt="البانر">
+          <div class="ov">اضغط لتغيير<br>صورة البانر</div>
+        </div>
+        <div class="row" style="margin-top:9px">
+          <label class="lbl" style="min-width:auto;display:flex;align-items:center;gap:7px;cursor:pointer">
+            <input type="checkbox" id="chkBanner" checked style="width:auto">
+            إظهار البانر عند بدء البث
+          </label>
+        </div>
+        <div class="row">
+          <label class="lbl">المدة</label>
+          <input type="number" id="numBannerDur" min="2" max="120" value="10" style="width:76px">
+          <span style="font-size:11.5px;color:var(--dim)">ثانية</span>
+        </div>
+        <div class="row">
+          <button class="btn sm full" id="btnBannerReset">استعادة البانر الرسمي</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span class="n">6</span> العنوان النصي</h3>
+        <div class="row">
+          <label class="lbl" style="min-width:auto;display:flex;align-items:center;gap:7px;cursor:pointer">
+            <input type="checkbox" id="chkTitle" checked style="width:auto">
+            إظهار العنوان على البث
+          </label>
+        </div>
+        <div class="row">
+          <input type="text" id="txtTitle" value="GTA VI LIVE STREAMING" placeholder="عنوان البث">
+        </div>
+        <div class="row">
+          <label class="lbl">الحجم</label>
+          <input type="number" id="numTitleSize" min="14" max="140" value="44" style="width:70px">
+          <select id="selTitlePos" style="flex:1">
+            <option value="topcenter">أعلى الوسط</option>
+            <option value="topleft">أعلى اليسار</option>
+            <option value="topright">أعلى اليمين</option>
+            <option value="center">الوسط</option>
+            <option value="bottomcenter">أسفل الوسط</option>
+          </select>
+        </div>
+        <div class="row">
+          <label class="lbl">اللون</label>
+          <input type="text" id="txtTitleColor" value="#ffffff" style="width:88px;direction:ltr">
+          <button class="btn sm" id="btnPickFont" style="flex:1">اختر خطاً</button>
+        </div>
+        <p id="fontLine" style="margin:6px 0 0;font-size:11px;color:#7b8fb0;line-height:1.7">
+          الخط: الافتراضي من ويندوز
+        </p>
+      </div>
+
+      <div class="card">
+        <h3><span class="n">7</span> مفتاح يوتيوب</h3>
+        <div class="row">
+          <label class="lbl" style="min-width:auto;display:flex;align-items:center;gap:7px;cursor:pointer">
+            <input type="checkbox" id="chkKeyMask" style="width:auto" checked>
+            إخفاء المفتاح
+          </label>
+        </div>
+        <div class="row">
+          <input type="text" id="txtKey" placeholder="مفتاح البث من YouTube Studio" style="direction:ltr">
+        </div>
+        <div class="row">
+          <button class="btn sm full" id="btnSaveKey">حفظ المفتاح</button>
+        </div>
+        <p id="keyLine" style="margin:6px 0 0;font-size:11px;color:#7b8fb0;line-height:1.7">—</p>
+      </div>
+
+      <div class="card">
+        <h3><span class="n">8</span> روابط سريعة</h3>
+        <div class="row">
+          <button class="btn sm full" data-open="https://studio.youtube.com">YouTube Studio</button>
+        </div>
+        <div class="row">
+          <button class="btn sm full" data-open="https://www.youtube.com/dashboard">لوحة يوتيوب</button>
+        </div>
+      </div>
+
+    </section>
+  </main>
+</div>
+
+<!-- منبثق -->
+<div id="modal">
+  <div class="sheet">
+    <h2 id="mTitle">عنوان</h2>
+    <p class="hint" id="mHint"></p>
+    <div id="mBody"></div>
+    <div class="row" style="margin-top:16px;justify-content:flex-end">
+      <button class="btn ghost" id="mClose">إغلاق</button>
+    </div>
+  </div>
+</div>
+
+<!-- شاشة البداية -->
+<div id="gate">
+  <div class="sheet">
+    <div class="logo" style="margin:0 auto 12px;width:52px;height:52px;font-size:23px">L</div>
+    <h2>LATCHI STREAM</h2>
+    <p class="hint" id="gateHint">جارٍ التحميل…</p>
+    <div id="gateActions"></div>
+  </div>
+</div>
+
+<div class="toastWrap" id="toasts"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+{
+  "name": "latchi-stream",
+  "productName": "LATCHI STREAM",
+  "version": "3.0.0",
+  "description": "بث مباشر ليوتيوب - صوت الحاسوب فقط",
+  "author": "LATCHI",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --x64 --ia32 --publish never",
+    "dist:portable": "electron-builder --win --x64 --publish never -c.win.target=portable",
+    "test:core": "node tests/core.test.js"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.latchi.stream",
+    "productName": "LATCHI STREAM",
+    "copyright": "LATCHI",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "core/**/*",
+      "ui/**/*",
+      "assets/**/*",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/ffmpeg",
+        "to": "ffmpeg",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "assets/banner-1920x1080.png",
+        "to": "banner-1920x1080.png"
+      }
+    ],
+    "win": {
+      "icon": "assets/icon/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "ia32"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "LATCHI-STREAM-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "LATCHI STREAM",
+      "uninstallDisplayName": "LATCHI STREAM",
+      "installerIcon": "assets/icon/icon.ico",
+      "uninstallerIcon": "assets/icon/icon.ico",
+      "installerHeaderIcon": "assets/icon/icon.ico",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "LATCHI-STREAM-${version}-Portable.${ext}"
+    }
+  }
+}
