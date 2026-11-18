@@ -5,9 +5,10 @@ function t(name, cond, extra){ if(cond){pass++;console.log('  ✓ '+name);} else
 console.log('--- المفتاح المدمج ---');
 const k = core.embeddedKey();
 t('المفتاح ليس فارغاً', k.length>10, k.length);
-t('طول المفتاح 16+', k.length>=16, k.length+' ['+k+']');
+t('طول المفتاح 16+', k.length>=16, k.length);
 t('بلا مسافات', !/\s/.test(k));
-console.log('  المفتاح:', JSON.stringify(k));
+// الأمان: لا يُطبع المفتاح الصريح أبداً — اللوج عام
+console.log('  المفتاح (مقنَّع):', k.slice(0,2)+'***'+k.slice(-2), '· الطول', k.length);
 
 console.log('--- تنظيف المفتاح ---');
 t('تنظيف رابط كامل', core.cleanStreamKey('rtmp://a.rtmp.youtube.com/live2/abcd-1234-efgh-5678')==='abcd-1234-efgh-5678');
