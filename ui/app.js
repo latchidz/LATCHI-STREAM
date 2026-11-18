@@ -112,7 +112,13 @@ async function boot() {
   await refreshAudio();
   const enc = await L.encodersList();
   log('المُرمِّزات: ' + enc.encoders.join(', '), 'ok');
-  if (!enc.encoders.includes(S.encoder)) { S.encoder = enc.encoders[0]; persist({ encoder: S.encoder }); }
+  // ★ لا نستبدل المُرمِّز إلا إذا كان الحالي غير متاح فعلاً (نُبقي libx264 لأنه الأنسب للشاشة)
+  if (!enc.encoders.includes(S.encoder)) {
+    const pref = ['libx264', 'h264_qsv', 'h264_amf', 'h264_nvenc'].find(e => enc.encoders.includes(e)) || enc.encoders[0];
+    S.encoder = pref;
+    persist({ encoder: S.encoder });
+    log('المُرمِّز المُختار: ' + pref, 'info');
+  }
 
   L.windowList().then(r => fillWindows(r.windows));
 
@@ -980,7 +986,8 @@ function openModal(title, hint) {
 // ---------------------------------------------------------------- بدء
 window.addEventListener('DOMContentLoaded', () => {
   try { wireFfPanel(); } catch (e) {}
-  try { checkFfmpeg(false); } catch (e) {}
+  // فحص صامت عند الإقلاع: يُحدّث الشريحة فقط ولا يفتح لوحة (لا نزعج المستخدم عند النجاح)
+  setTimeout(() => { try { checkFfmpeg(false); } catch (e) {} }, 2500);
   boot().catch(e => {
     console.error(e);
     $('#gateHint').textContent = 'خطأ في التحميل: ' + (e && e.message);

@@ -37,7 +37,8 @@ let psBlockerId = null;      // مانع السكون أثناء البث
 
 // مسار مؤقت سريع (لا تخلطه بملفات المستخدم)
 function tmpDir() {
-  const d = path.join(app.getPath('userData'), 'cache');
+  // ★ ذاكرة مؤقتة دائمة في %TEMP% (تُفرَّغ تلقائياً) — لا نستهلك قرص المستخدم
+  const d = path.join(os.tmpdir(), 'latchi-stream');
   try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); } catch (e) {}
   return d;
 }
