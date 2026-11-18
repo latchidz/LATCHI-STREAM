@@ -97,8 +97,8 @@ jobs:
         shell: pwsh
         run: |
           if (Test-Path dist/win-unpacked) {
-            Compress-Archive -Path dist/win-unpacked/* -DestinationPath dist/LATCHI-STREAM-3.0.1-win-x64.zip -Force
-            Write-Host "zip: $((Get-Item dist/LATCHI-STREAM-3.0.1-win-x64.zip).Length) bytes"
+            Compress-Archive -Path dist/win-unpacked/* -DestinationPath dist/LATCHI-STREAM-3.1.0-win-x64.zip -Force
+            Write-Host "zip: $((Get-Item dist/LATCHI-STREAM-3.1.0-win-x64.zip).Length) bytes"
           }
 
       - name: Build portable (x64)
@@ -115,7 +115,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: LATCHI-STREAM-v3.0.1-windows
+          name: LATCHI-STREAM-v3.1.0-windows
           path: |
             dist/*.exe
             dist/*.zip
@@ -127,8 +127,8 @@ jobs:
         if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release) }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'push' && github.ref_name || 'latchi-stream-v3.0.0' }}
-          name: 'LATCHI STREAM v3.0.1'
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || 'latchi-stream-v3.1.0' }}
+          name: 'LATCHI STREAM v3.1.0'
           draft: false
           generate_release_notes: true
           files: |

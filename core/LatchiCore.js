@@ -90,6 +90,8 @@ function defaultSettings(screenW = 1920, screenH = 1080) {
     previewFps: 8,
     previewWidth: 720,
     autoRestart: true,
+    restartMax: 5,
+    closeToTray: true,
     // البانر والعنوان
     bannerEnabled: true,
     bannerPath: '',

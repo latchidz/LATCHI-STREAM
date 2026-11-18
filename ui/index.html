@@ -29,7 +29,7 @@
   #app{display:flex;flex-direction:column;height:100vh}
 
   header{
-    display:flex;align-items:center;gap:14px;
+    display:flex;align-items:center;gap:14px;flex-wrap:wrap;
     padding:10px 16px;border-bottom:1px solid var(--line);
     background:linear-gradient(180deg,#101a2a,#0a1220);
     flex:0 0 auto;
@@ -210,15 +210,20 @@
   }
   .bannerBox:hover .ov{opacity:1}
 
-  /* ---------- المتصفح المدمج ---------- */
+  /* ---------- المتصفح المدمج: شاشة كاملة فوق كل شيء ---------- */
   #browserArea{
-    position:absolute;inset:0;background:#080d15;display:none;
-    grid-template-rows:auto 1fr;z-index:30;
+    position:fixed;inset:0;background:#080d15;display:none;
+    grid-template-rows:auto 1fr;z-index:120;
   }
   #browserArea.on{display:grid}
   .browserBar{
     display:flex;gap:8px;align-items:center;padding:8px 10px;
     background:#0d1626;border-bottom:1px solid var(--line);
+  }
+  .browserBar .navBtn{flex:0 0 auto;min-width:42px;padding:6px 9px}
+  .escNote{
+    font-size:10.5px;color:#8fb3e8;white-space:nowrap;flex:0 0 auto;
+    border:1px dashed #2a3d5e;border-radius:7px;padding:5px 9px;background:#0a1220;
   }
   .browserBar input{flex:1}
   #browserStage{position:relative;background:#fff;min-height:0}
@@ -286,15 +291,17 @@
     <div class="logo">L</div>
     <div class="brand">
       <b>LATCHI STREAM</b>
-      <span id="verLine">الإصدار 3.0.0</span>
+      <span id="verLine">الإصدار 3.1.0</span>
     </div>
     <div class="grow"></div>
     <span class="chip" id="chipFfmpeg"><i class="dot"></i> ffmpeg</span>
     <span class="chip" id="chipKey"><i class="dot"></i> مفتاح البث</span>
     <span class="chip" id="chipAudio"><i class="dot"></i> صوت النظام</span>
-    <span class="liveBadge" id="liveBadge"><i class="dot pulse"></i> مباشر <b id="liveTime" dir="ltr">00:00:00</b></span>
-    <button class="btn sm ghost" id="btnBrowserTop">المتصفح المدمج</button>
-  </header>
+      <span class="liveBadge" id="liveBadge"><i class="dot pulse"></i> مباشر <b id="liveTime" dir="ltr">00:00:00</b></span>
+      <button class="btn sm ghost" id="btnBrowserTop">المتصفح المدمج</button>
+      <button class="btn sm ghost" id="btnHide" title="يخفي النافذة إلى أيقونة الساعة — البث يستمر في الخلفية">إخفاء للخلفية</button>
+      <button class="btn sm ghost" id="btnQuit" title="إيقاف البث (إن كان يعمل) وإغلاق التطبيق نهائياً">خروج نهائي</button>
+    </header>
 
   <main>
     <!-- ============ العمود الأيسر ============ -->
@@ -430,7 +437,7 @@
             <div class="lpRow"><span>الإطارات</span><b id="liveStatFps" dir="ltr">—</b></div>
             <div class="lpRow"><span>المدة</span><b id="liveStatTime" dir="ltr">—</b></div>
           </div>
-          <p class="lpHint">تُعالج الشاشة وتُرسل مباشرة إلى يوتيوب. البانر يظهر في أول البث فقط.</p>
+          <p class="lpHint">تُعالج الشاشة وتُرسل مباشرة إلى يوتيوب. يمكنك تصغير النافذة أو إخفاؤها (X) — البث يستمر في الخلفية. البانر يظهر في أول البث فقط.</p>
         </div>
 
         <div id="prevIdle">
@@ -445,17 +452,21 @@
           </div>
         </div>
 
-        <!-- المتصفح المدمج -->
+        <!-- المتصفح المدمج: شاشة كاملة -->
         <div id="browserArea">
           <div class="browserBar">
+            <button class="btn sm navBtn" id="btnBrowserBack" title="رجوع">رجوع</button>
+            <button class="btn sm navBtn" id="btnBrowserFwd" title="تقدّم">تقدّم</button>
+            <button class="btn sm navBtn" id="btnBrowserReload" title="تحديث الصفحة">تحديث</button>
             <input type="text" id="browserUrl" placeholder="https://studio.youtube.com" spellcheck="false">
             <button class="btn sm" id="btnBrowserGo">فتح</button>
-            <button class="btn sm ghost" id="btnBrowserClose">إغلاق</button>
+            <span class="escNote" title="اضغط ESC مرتين بسرعة للخروج من المتصفح">ESC ×2 = خروج</span>
+            <button class="btn sm red" id="btnBrowserClose">✕ إغلاق المتصفح</button>
           </div>
           <div id="browserStage">
             <div id="browserHint">
-              المتصفح المدمج — كل شيء داخل التطبيق<br>
-              <span style="font-size:11.5px;color:#456486">أدخل رابط المنصة ثم اضغط «فتح». للبث منها اختر «نافذة» كمصدر.</span>
+              المتصفح المدمج — شاشة كاملة، كل شيء داخل التطبيق<br>
+              <span style="font-size:11.5px;color:#456486">أدخل الرابط ثم اضغط «فتح». للخروج: زر «إغلاق المتصفح» أو اضغط ESC مرتين بسرعة.</span>
             </div>
           </div>
         </div>
@@ -477,6 +488,7 @@
         <button class="btn blue" id="btnStreamStart" style="min-width:210px">بدء البث إلى يوتيوب</button>
         <button class="btn red" id="btnStreamStop" disabled style="min-width:130px">إيقاف البث</button>
         <button class="btn" id="btnKeyTest">اختبار المفتاح</button>
+        <span id="streamSpec" style="font-size:11px;color:#7b8fb0;white-space:nowrap" title="الدقة المختارة + القص المحفوظ من المعاينة"></span>
         <div class="grow"></div>
         <button class="btn sm" id="btnFull">شاشة كاملة</button>
       </div>

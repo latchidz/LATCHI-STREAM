@@ -1,13 +1,15 @@
 // ==============================================================================================
-// LATCHI STREAM 3.0.0  -  تطبيق حاسوب حقيقي (Electron)  -  العملية الرئيسية
+// LATCHI STREAM 3.1.0  -  تطبيق حاسوب حقيقي (Electron)  -  العملية الرئيسية
 // ----------------------------------------------------------------------------------------------
 // كل شيء داخل نافذة التطبيق: لا متصفح خارجي، لا خادم ويب، لا منفذ مفتوح.
 // المعاينة، القص، الزوم، البانر، العنوان، والبث الفعلي إلى يوتيوب كلها هنا.
+// جديد 3.1.0: البث في الخلفية (إخفاء النافذة لا يوقف البث)، أيقونة Tray بمشغّل بث،
+//             إعادة اتصال تلقائي عند الانقطاع، مانع سكون، متصفح مدمج بشاشة كاملة + ESC ×2.
 // ==============================================================================================
 
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, Tray, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -27,6 +29,9 @@ let liveServer = '';
 let lastError = '';
 let blockedAudio = [];
 let FFMPEG = null;
+let tray = null;             // أيقونة الخلفية (Tray)
+let quitting = false;        // خروج نهائي حقيقي (من أيقونة الساعة)
+let psBlockerId = null;      // مانع السكون أثناء البث
 
 // مسار مؤقت سريع (لا تخلطه بملفات المستخدم)
 function tmpDir() {
@@ -125,6 +130,26 @@ function killTree(p) {
   if (process.platform === 'win32') {
     try { spawn('taskkill', ['/PID', String(p.pid), '/F', '/T'], { windowsHide: true, stdio: 'ignore' }); } catch (e) {}
   }
+}
+
+// إرسال آمن للواجهة (حتى لو كانت النافذة مخفية أو مُخرَّبة)
+function safeSend(ch, payload) {
+  try { if (win && !win.isDestroyed()) win.webContents.send(ch, payload); } catch (e) {}
+}
+
+function fmtElapsed() {
+  if (!liveStarted) return '';
+  const sec = Math.floor((Date.now() - liveStarted.getTime()) / 1000);
+  return [Math.floor(sec / 3600), Math.floor((sec % 3600) / 60), sec % 60]
+    .map(x => String(x).padStart(2, '0')).join(':');
+}
+
+// مانع السكون: يمنع ويندوز من إسبات الجهاز أثناء البث
+function startPowerBlocker() {
+  try { if (psBlockerId === null) psBlockerId = powerSaveBlocker.start('prevent-app-suspension'); } catch (e) {}
+}
+function stopPowerBlocker() {
+  try { if (psBlockerId !== null) { powerSaveBlocker.stop(psBlockerId); psBlockerId = null; } } catch (e) {}
 }
 
 function run(exe, args, timeoutMs) {
@@ -248,6 +273,102 @@ async function testKey(key) {
 }
 
 // ------------------------------------------------------------------ البث الحي
+// ★ نجاح الاتصال ≠ نجاح البث: يُقرأ معدل الإطارات الحقيقي بعد 12 ثانية ويُرفض البث الكاذب.
+// ★ عند الانقطاع المفاجئ يعاد الاتصال تلقائياً حتى restartMax مرات (إعداد autoRestart).
+const RESTART_DELAY = 3000;
+let liveArgs = null;        // آخر أمر بث ناجح — يُستعمل لإعادة الاتصال
+let restartCount = 0;       // عدّاد إعادة الاتصال للجلسة الحالية
+let restartTimer = null;
+let userStop = false;       // true = الإيقاف بطلب المستخدم (بلا إعادة اتصال)
+
+function restartMax() {
+  return Math.max(1, parseInt((settings && settings.restartMax) || 5, 10) || 5);
+}
+
+function spawnLive(args) {
+  let p;
+  try { p = spawn(FFMPEG, args, { windowsHide: true }); }
+  catch (e) { return null; }
+
+  p.on('close', (code) => {
+    if (liveProc !== p) return;           // عملية قديمة أو أُوقفت بطلب المستخدم
+    liveProc = null; liveStarted = null;
+    stopPowerBlocker();
+    updateTray();
+    if (userStop || quitting) return;
+    // انقطاع غير متوقع → إعادة اتصال تلقائية
+    if (settings && settings.autoRestart !== false && liveArgs && restartCount < restartMax()) {
+      restartCount++;
+      lastError = 'انقطع البث (كود ' + code + ') — إعادة اتصال ' + restartCount + '/' + restartMax();
+      safeSend('log', lastError);
+      safeSend('stream-restarting', { attempt: restartCount, max: restartMax(), error: lastError });
+      scheduleRestart();
+    } else {
+      lastError = 'توقف البث (كود ' + code + ')';
+      liveArgs = null;
+      safeSend('stream-ended', { code, error: lastError });
+    }
+  });
+  return p;
+}
+
+function scheduleRestart() {
+  if (restartTimer) clearTimeout(restartTimer);
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    if (quitting || userStop || !liveArgs || !FFMPEG) return;
+    try { fs.writeFileSync(progressFile(), ''); } catch (e) {}
+    const p = spawnLive(liveArgs);
+    if (!p) return;
+    // إن صمد 6 ثوانٍ فقد عاد البث فعلاً
+    setTimeout(() => {
+      if (liveProc === p && p.exitCode === null && !userStop && !quitting) {
+        liveStarted = new Date();
+        startPowerBlocker();
+        updateTray();
+        safeSend('log', '✓ عاد البث للعمل بعد إعادة الاتصال رقم ' + restartCount);
+        safeSend('stream-restarted', { attempt: restartCount });
+      }
+    }, 6000);
+  }, RESTART_DELAY);
+}
+
+function runAttempt(s, which) {
+  return new Promise((res) => {
+    const b = core.buildLiveArgs(s, progressFile(), which);
+    if (!b.ok) return res({ ok: false, error: b.errors.join(' ') });
+
+    userStop = false; restartCount = 0;
+    let err = '';
+    let settled = false;
+    const settle = (v) => { if (!settled) { settled = true; res(v); } };
+
+    const p = spawnLive(b.args);
+    if (!p) return res({ ok: false, error: 'تعذّر تشغيل ffmpeg' });
+
+    p.stderr.on('data', d => { if (err.length < 60000) err += d.toString(); });
+    p.on('error', e => { clearTimeout(timer); settle({ ok: false, error: String(e && e.message || e) }); });
+    p.on('close', (code) => {
+      clearTimeout(timer);
+      if (!settled) {
+        const tail = err.split('\n').map(x => x.trim()).filter(Boolean).slice(-5).join(' · ');
+        settle({ ok: false, error: (tail || ('ffmpeg خرج بالكود ' + code)).slice(0, 900) });
+      }
+    });
+
+    // معيار النجاح المبدئي: صمد 3 ثوانٍ دون موت
+    const timer = setTimeout(() => {
+      if (p.exitCode === null) {
+        liveProc = p;
+        liveStarted = new Date();
+        liveServer = which;
+        liveArgs = b.args;
+        settle({ ok: true, pid: p.pid, server: which });
+      }
+    }, 3000);
+  });
+}
+
 function startLive(s) {
   return new Promise(async (resolve) => {
     if (!FFMPEG) return resolve({ ok: false, error: 'ffmpeg.exe غير موجود' });
@@ -258,60 +379,24 @@ function startLive(s) {
     stopLive();
     try { fs.writeFileSync(progressFile(), ''); } catch (e) {}
 
-    const attempt = (which) => new Promise((res) => {
-      const b = core.buildLiveArgs(s, progressFile(), which);
-      if (!b.ok) return res({ ok: false, error: b.errors.join(' ') });
-
-      let err = '';
-      let p;
-      try { p = spawn(FFMPEG, b.args, { windowsHide: true }); }
-      catch (e) { return res({ ok: false, error: 'تعذّر تشغيل ffmpeg: ' + e.message }); }
-
-      let settled = false;
-      const settle = (v) => { if (!settled) { settled = true; res(v); } };
-
-      p.stderr.on('data', d => { if (err.length < 60000) err += d.toString(); });
-      p.on('error', e => { clearTimeout(timer); settle({ ok: false, error: String(e && e.message || e) }); });
-      p.on('close', (code) => {
-        clearTimeout(timer);
-        if (!settled) {
-          const tail = err.split('\n').map(x => x.trim()).filter(Boolean).slice(-5).join(' · ');
-          return settle({ ok: false, error: (tail || ('ffmpeg خرج بالكود ' + code)).slice(0, 900) });
-        }
-        // كان يعمل ثم توقف
-        if (liveProc === p) {
-          liveProc = null; liveStarted = null;
-          lastError = 'توقف البث (كود ' + code + ')';
-          if (win) win.webContents.send('stream-ended', { code, error: lastError });
-        }
-      });
-
-      // معيار النجاح المبدئي: صمد 3 ثوانٍ دون موت
-      const timer = setTimeout(() => {
-        if (p.exitCode === null) {
-          liveProc = p;
-          liveStarted = new Date();
-          liveServer = which;
-          settle({ ok: true, pid: p.pid, server: which, _verify: true });
-        }
-      }, 3000);
-    });
-
-    let r = await attempt('primary');
+    let r = await runAttempt(s, 'primary');
     if (r.ok) {
       r = await verifyThroughput(s);
     }
     if (!r.ok) {
-      if (win) win.webContents.send('log', 'الخادم الرئيسي لم يستجب — تجريب الاحتياطي…');
-      const r2 = await attempt('backup');
+      if (liveProc) { killTree(liveProc); liveProc = null; }
+      safeSend('log', 'الخادم الرئيسي لم يستجب — تجريب الاحتياطي…');
+      const r2 = await runAttempt(s, 'backup');
       if (r2.ok) {
         const v = await verifyThroughput(s);
-        if (v.ok) return resolve(v);
+        if (v.ok) { startPowerBlocker(); updateTray(); return resolve(v); }
         stopLive();
         return resolve(v);
       }
       return resolve({ ok: false, error: 'فشل البث على الخادمين:\n' + r.error });
     }
+    startPowerBlocker();
+    updateTray();
     resolve(r);
   });
 }
@@ -326,10 +411,10 @@ function verifyThroughput(s) {
       const want = parseInt(s.fps, 10) || 30;
       const got = readProgress().fps;
       const floor = Math.max(3, want * 0.25);   // 25% من الهدف = بث مقبول
-      if (got >= floor) return resolve({ ok: true, fps: got, verified: true, _verify: false });
+      if (got >= floor) return resolve({ ok: true, fps: got, verified: true });
       stopLive();
       lastError = 'معدل إطارات منخفض: ' + got.toFixed(1);
-      if (win) win.webContents.send('stream-ended', { code: -2, error: lastError });
+      safeSend('stream-ended', { code: -2, error: lastError });
       resolve({
         ok: false,
         error: 'الجهاز عاجز عن الترميز بهذه الجودة: ' + got.toFixed(1) +
@@ -341,9 +426,13 @@ function verifyThroughput(s) {
 }
 
 function stopLive() {
+  userStop = true;
+  if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
   if (liveProc) { killTree(liveProc); liveProc = null; }
-  liveStarted = null; liveServer = '';
+  liveStarted = null; liveArgs = null; liveServer = '';
+  stopPowerBlocker();
   try { fs.writeFileSync(progressFile(), ''); } catch (e) {}
+  updateTray();
 }
 
 function readProgress() {
@@ -422,6 +511,63 @@ Add-Type -TypeDefinition $src -ErrorAction Stop
   return { ok: true, x, y, w, h };
 }
 
+// ------------------------------------------------------------------ أيقونة الخلفية (Tray)
+function trayIconPath() {
+  const cands = [path.join(__dirname, 'assets', 'icon', 'icon.ico'),
+                 path.join(__dirname, 'build', 'icon.ico')];
+  for (const c of cands) { try { if (fs.existsSync(c)) return c; } catch (e) {} }
+  return '';
+}
+
+function showMainWindow() {
+  try {
+    if (!win || win.isDestroyed()) { createWindow(); return; }
+    if (win.isMinimized()) win.restore();
+    win.show(); win.focus();
+  } catch (e) {}
+}
+
+function balloon(title, content) {
+  if (process.platform !== 'win32' || !tray) return;
+  try { tray.displayBalloon({ title, content }); } catch (e) {}
+}
+
+function updateTray() {
+  if (!tray) return;
+  try {
+    const live = !!liveProc;
+    tray.setToolTip(live ? 'LATCHI STREAM — البث يعمل على يوتيوب' + (liveStarted ? ' · ' + fmtElapsed() : '')
+                         : 'LATCHI STREAM — جاهز في الخلفية');
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: live ? '● البث يعمل على يوتيوب' + (liveStarted ? ' · ' + fmtElapsed() : '')
+                    : 'البث متوقف', enabled: false },
+      { type: 'separator' },
+      { label: 'إظهار التطبيق', click: showMainWindow },
+      { label: 'إيقاف البث', enabled: live,
+        click: () => { stopLive(); safeSend('log', 'أُوقف البث من أيقونة الخلفية'); } },
+      { label: 'بدء البث (الإعدادات المحفوظة)', enabled: !live && !!(settings && settings.youtubeKey),
+        click: () => {
+          const s = Object.assign({}, settings);
+          startLive(s).then(r => {
+            if (r.ok) { stopPreview(); balloon('LATCHI STREAM', 'انطلق البث على يوتيوب ✓'); }
+            else safeSend('log', 'فشل بدء البث: ' + r.error);
+          });
+        } },
+      { type: 'separator' },
+      { label: 'خروج نهائي (يوقف البث)', click: () => { quitting = true; app.quit(); } }
+    ]));
+  } catch (e) {}
+}
+
+function createTray() {
+  try {
+    const p = trayIconPath();
+    if (!p) { tray = null; return; }
+    tray = new Tray(p);
+  } catch (e) { tray = null; return; }
+  updateTray();
+}
+
 // ------------------------------------------------------------------ النافذة
 function createWindow() {
   win = new BrowserWindow({
@@ -447,6 +593,19 @@ function createWindow() {
   win.setMenuBarVisibility(false);
   win.loadFile(path.join(__dirname, 'ui', 'index.html'));
   win.once('ready-to-show', () => { win.show(); win.focus(); });
+
+  // ★ الإغلاق (X) لا يخرج من التطبيق: النافذة تُخفى والبث يستمر في الخلفية.
+  //   الخروج النهائي فقط من أيقونة الساعة أو زر «خروج نهائي».
+  win.on('close', (e) => {
+    if (quitting) return;
+    if (settings && settings.closeToTray === false) { quitting = true; app.quit(); return; }
+    e.preventDefault();
+    try { win.hide(); } catch (err) {}
+    balloon('LATCHI STREAM — في الخلفية',
+            liveProc ? 'البث مستمر على يوتيوب ✓ افتح التطبيق من أيقونة الساعة بجانب الوقت.'
+                     : 'التطبيق يعمل في الخلفية. الخروج النهائي من أيقونة الساعة.');
+  });
+
   win.on('closed', () => { win = null; });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -521,7 +680,7 @@ function ipc() {
       Object.assign(settings, { cropX: rc.x, cropY: rc.y, cropW: rc.w, cropH: rc.h,
                                 screenW: cfg.screenW, screenH: cfg.screenH });
       saveSettings();
-      if (win) win.webContents.send('log', 'وضع اللعبة: نافذة عند (' + rc.x + ',' + rc.y + ') بحجم ' + rc.w + '×' + rc.h);
+      safeSend('log', 'وضع اللعبة: نافذة عند (' + rc.x + ',' + rc.y + ') بحجم ' + rc.w + '×' + rc.h);
     }
     const r = await startLive(cfg);
     if (r.ok) stopPreview();     // تحرير المعالج للبث
@@ -539,6 +698,7 @@ function ipc() {
     }
     return {
       streaming: !!liveProc, previewOn: !!previewProc,
+      restarting: !!restartTimer, restartCount,
       fps: pr.fps, dropped: pr.dropped, bitrate: pr.bitrate,
       elapsed, lastError, server: liveServer, ffmpeg: !!FFMPEG
     };
@@ -681,22 +841,57 @@ public class WP {
 
   ipcMain.handle('fullscreen:get', async () => ({ full: win ? win.isFullScreen() : false }));
   ipcMain.handle('fullscreen:set', async (e, on) => { if (win) win.setFullScreen(!!on); return { ok: true }; });
+
+  // إخفاء النافذة إلى الخلفية (البث يستمر) + خروج نهائي حقيقي
+  ipcMain.handle('window:hide', async () => {
+    try { if (win && !win.isDestroyed()) win.hide(); } catch (e) {}
+    balloon('LATCHI STREAM — في الخلفية',
+            liveProc ? 'البث مستمر على يوتيوب ✓' : 'التطبيق يعمل في الخلفية');
+    return { ok: true };
+  });
+  ipcMain.handle('app:quit', async () => {
+    quitting = true;
+    app.quit();
+    return { ok: true };
+  });
 }
 
 // ------------------------------------------------------------------ دورة الحياة
-app.whenReady().then(() => {
-  FFMPEG = findFfmpeg();
-  loadSettings();
-  ensureAssets();
-  Menu.setApplicationMenu(null);
-  ipc();
-  createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-});
+// نسخة واحدة فقط من التطبيق: أي تشغيل ثانٍ يُظهر النافذة الموجودة بدل فتح نسخة جديدة
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => showMainWindow());
+
+  app.whenReady().then(() => {
+    FFMPEG = findFfmpeg();
+    loadSettings();
+    ensureAssets();
+    Menu.setApplicationMenu(null);
+    ipc();
+    createTray();
+    createWindow();
+
+    // التقاط ESC داخل صفحات المتصفح المدمج (webview) وتحويله للواجهة
+    // حتى يعمل «ESC مرتين للخروج» وأنت داخل الصفحة نفسها
+    app.on('web-contents-created', (e, contents) => {
+      if (contents.getType() === 'webview') {
+        contents.on('before-input-event', (ev, input) => {
+          if (input.type === 'keyDown' && input.key === 'Escape') {
+            safeSend('browser-esc', { ts: Date.now() });
+          }
+        });
+      }
+    });
+
+    app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  });
+}
 
 app.on('window-all-closed', () => {
-  stopPreview(); stopLive();
-  if (process.platform !== 'darwin') app.quit();
+  // لا خروج تلقائي: النافذة تُخفى للخلفية والبث مستمر.
+  // الخروج النهائي من أيقونة الساعة (خروج نهائي) أو زر «خروج نهائي».
 });
-app.on('before-quit', () => { stopPreview(); stopLive(); });
+app.on('before-quit', () => { quitting = true; stopPreview(); stopLive(); });
 process.on('exit', () => { stopPreview(); stopLive(); });

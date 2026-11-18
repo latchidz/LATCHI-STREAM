@@ -14,6 +14,8 @@ let streaming = false;
 let pollTimer = null;
 let lowFpsWarned = false;
 let frameTimer = null;
+let restarting = false;   // البث في فترة إعادة اتصال تلقائي
+let escStamps = [];       // أزمنة ضغطات ESC الأخيرة (للخروج المزدوج من المتصفح)
 
 let box = null;          // منطقة القص بإحداثيات الصورة المعروضة
 let dragging = null;
@@ -120,7 +122,7 @@ async function boot() {
       '<span style="font-size:11.5px;color:#7b8fb0">ضع ffmpeg.exe بجانب التطبيق أو في مجلد resources\\ffmpeg</span>';
     $('#gateActions').innerHTML = '<button class="btn ghost" id="gateGo">متابعة</button>';
   } else {
-    $('#gateHint').innerHTML = 'جاهز للانطلاق.<br><span style="font-size:11.5px;color:#7b8fb0">كل شيء داخل هذه النافذة — لا متصفح.</span>';
+    $('#gateHint').innerHTML = 'جاهز للانطلاق.<br><span style="font-size:11.5px;color:#7b8fb0">«بدء البث» يبثّ شاشتك مباشرة على يوتيوب. الإغلاق (X) يخفي التطبيق للخلفية والبث يستمر.</span>';
     $('#gateActions').innerHTML = '<button class="btn green" id="gateGo">ابدأ</button>';
   }
   $('#gateGo').onclick = () => { $('#gate').style.display = 'none'; };
@@ -353,6 +355,18 @@ function bindEvents() {
   $('#btnBrowserTop').onclick = openBrowser;
   $('#btnBrowserClose').onclick = closeBrowser;
   $('#btnBrowserGo').onclick = goBrowser;
+  $('#btnBrowserBack').onclick = () => {
+    const wv = document.querySelector('#browserStage webview');
+    if (wv && wv.canGoBack && wv.canGoBack()) wv.goBack();
+  };
+  $('#btnBrowserFwd').onclick = () => {
+    const wv = document.querySelector('#browserStage webview');
+    if (wv && wv.canGoForward && wv.canGoForward()) wv.goForward();
+  };
+  $('#btnBrowserReload').onclick = () => {
+    const wv = document.querySelector('#browserStage webview');
+    if (wv) { try { wv.reload(); } catch (e) {} }
+  };
   $('#browserUrl').onkeydown = e => { if (e.key === 'Enter') goBrowser(); };
   $$('[data-open]').forEach(b => b.onclick = () => {
     $('#browserUrl').value = b.dataset.open;
@@ -362,28 +376,78 @@ function bindEvents() {
 
   /* ---------------- شاشة كاملة ---------------- */
   $('#btnFull').onclick = async () => {
-    const st = await L.setFullscreen(true);
+    await L.setFullscreen(true);
     toast('شاشة كاملة — اضغط Esc للخروج', 'ok', 2600);
   };
+
+  /* ---------------- الخلفية والخروج ---------------- */
+  $('#btnHide').onclick = () => {
+    toast(streaming ? 'سيُخفى التطبيق — البث يبقى شغالاً على يوتيوب ✓' : 'سيُخفى التطبيق إلى الخلفية', 'ok', 1600);
+    setTimeout(() => L.hideToTray(), 700);
+  };
+  $('#btnQuit').onclick = () => {
+    openModal('خروج نهائي',
+      streaming ? 'البث يعمل الآن على يوتيوب — سيتم إيقافه ثم إغلاق التطبيق نهائياً.<br>إن أردت أن يبقى البث شغالاً، استعمل «إخفاء للخلفية» بدل الخروج.'
+                : 'سيتم إغلاق التطبيق نهائياً.');
+    $('#mBody').innerHTML = '<button class="btn red full" id="quitGo">تأكيد الخروج النهائي</button>';
+    $('#quitGo').onclick = () => L.quitApp();
+  };
+
+  /* ---------------- إعادة الاتصال التلقائي ---------------- */
+  L.onStreamRestarting(d => {
+    restarting = true;
+    const b = $('#liveBadge');
+    if (b) {
+      b.classList.add('on');
+      $('#liveTime').textContent = 'إعادة اتصال ' + d.attempt + '/' + d.max;
+    }
+    toast('انقطع البث — إعادة اتصال تلقائي (' + d.attempt + '/' + d.max + ')…', 'warn', 6000);
+    log(d.error || 'إعادة اتصال…', 'warn');
+  });
+  L.onStreamRestarted(d => {
+    restarting = false;
+    toast('✓ عاد البث للعمل بعد إعادة الاتصال', 'ok', 4200);
+    log('عاد البث للعمل (محاولة ' + d.attempt + ')', 'ok');
+  });
 
   /* ---------------- من الخلفية ---------------- */
   L.onLog(m => log(m));
   L.onStreamEnded(d => {
+    restarting = false;
     streaming = false; reflectStream(false);
     toast('توقف البث: ' + (d.error || ''), 'bad', 8000);
     log('توقف البث — ' + (d.error || ''), 'bad');
   });
 
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') {
-      closeBrowser();
-      $('#modal').classList.remove('on');
-      L.setFullscreen(false);
-    }
+    if (e.key === 'Escape') handleEsc();
   });
+  // ESC القادم من داخل صفحات المتصفح المدمج (يُحال من العملية الرئيسية)
+  L.onBrowserEsc(() => handleEsc());
 
   setupCropDrag();
   window.addEventListener('resize', () => { if (previewOn) sizeStage(); });
+}
+
+// ESC: مرتان بسرعة للخروج من المتصفح المدمج، وإلا فالأدوار الاعتيادية
+function handleEsc() {
+  const browserOn = $('#browserArea').classList.contains('on');
+  if (browserOn) {
+    const now = Date.now();
+    escStamps = escStamps.filter(t => now - t < 900);
+    escStamps.push(now);
+    if (escStamps.length >= 2) {
+      escStamps = [];
+      closeBrowser();
+      toast('أُغلق المتصفح المدمج', 'ok', 1800);
+    } else {
+      toast('اضغط ESC مرة أخرى للخروج من المتصفح', 'warn', 1600);
+    }
+    return;
+  }
+  escStamps = [];
+  $('#modal').classList.remove('on');
+  L.setFullscreen(false);
 }
 
 // ---------------------------------------------------------------- النوافذ
@@ -830,8 +894,13 @@ function startPolling() {
     $('#stFps').textContent = st.fps ? st.fps.toFixed(1) : '—';
     $('#stDrop').textContent = st.dropped || 0;
     $('#stTime').textContent = st.elapsed;
-    $('#liveTime').textContent = st.elapsed;
-    if (st.streaming !== streaming) { streaming = st.streaming; reflectStream(streaming); showLivePanel(streaming); }
+    if (!restarting) $('#liveTime').textContent = st.elapsed;
+    if ($('#streamSpec')) {
+      $('#streamSpec').textContent = S ?
+        (S.outW + '×' + S.outH + ' @' + S.fps + 'fps · قص ' + (S.cropW || 0) + '×' + (S.cropH || 0)) : '';
+    }
+    const eff = st.streaming || restarting;
+    if (eff !== streaming) { streaming = eff; reflectStream(streaming); showLivePanel(streaming); }
     if (st.streaming) {
       const f = $('#liveStatFps'), tm = $('#liveStatTime');
       if (f) f.textContent = (st.fps ? st.fps.toFixed(1) : '—') + ' / ' + (S ? S.fps : '');
@@ -878,6 +947,12 @@ function goBrowser() {
     wv.setAttribute('partition', 'persist:latchi');
     wv.style.width = '100%';
     wv.style.height = '100%';
+    wv.addEventListener('did-navigate', (e) => {
+      if (e && e.url) { $('#browserUrl').value = e.url; persist({ platformUrl: e.url }); }
+    });
+    wv.addEventListener('did-navigate-in-page', (e) => {
+      if (e && e.url) $('#browserUrl').value = e.url;
+    });
     stage.appendChild(wv);
   }
   $('#browserHint').style.display = 'none';

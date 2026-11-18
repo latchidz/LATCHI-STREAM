@@ -29,7 +29,12 @@ contextBridge.exposeInMainWorld('latchi', {
 
   openExternal:    (u)     => ipcRenderer.invoke('shell:open', u),
   quit:            ()      => ipcRenderer.invoke('app:quit'),
+  quitApp:         ()      => ipcRenderer.invoke('app:quit'),
+  hideToTray:      ()      => ipcRenderer.invoke('window:hide'),
 
   onLog:           (cb)    => ipcRenderer.on('log', (e, m) => cb(m)),
-  onStreamEnded:   (cb)    => ipcRenderer.on('stream-ended', (e, d) => cb(d))
+  onStreamEnded:   (cb)    => ipcRenderer.on('stream-ended', (e, d) => cb(d)),
+  onStreamRestarting: (cb) => ipcRenderer.on('stream-restarting', (e, d) => cb(d)),
+  onStreamRestarted:  (cb) => ipcRenderer.on('stream-restarted', (e, d) => cb(d)),
+  onBrowserEsc:    (cb)    => ipcRenderer.on('browser-esc', (e, d) => cb(d))
 });
