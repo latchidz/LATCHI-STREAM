@@ -161,6 +161,16 @@
   .modal{position:fixed;inset:0;background:rgba(4,7,12,.82);backdrop-filter:blur(5px);
     display:none;align-items:center;justify-content:center;padding:22px;z-index:200}
   .modal.on{display:flex}
+  .modebar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    background:linear-gradient(180deg,#101826,#0c1320);border:1px solid var(--line2);
+    border-radius:12px;padding:10px 14px;margin-bottom:12px}
+  .radios{display:grid;gap:10px}
+  .radio{display:flex;gap:11px;align-items:flex-start;background:#0d1522;
+    border:1px solid var(--line2);border-radius:11px;padding:12px 14px;cursor:pointer}
+  .radio:hover{border-color:var(--acc)}
+  .radio input{margin-top:3px;accent-color:#22c55e;width:16px;height:16px}
+  .radio b{font-size:13.5px}
+  .radio .hint{margin-top:3px}
   .modal .box{background:var(--card);border:1px solid var(--line2);border-radius:16px;
     padding:24px;max-width:620px;width:100%;max-height:88vh;overflow-y:auto}
   .modal h3{font-size:16px;margin-bottom:6px}
@@ -188,7 +198,7 @@
       <p>بث فيديوهات محلية إلى YouTube مباشرة</p>
     </div>
     <div class="hspacer"></div>
-    <span class="vbadge" id="verBadge">v4.1.0</span>
+    <span class="vbadge" id="verBadge">v4.2.0</span>
     <button class="btn sm ghost" id="btnSettings" title="الإعدادات">
       <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.7"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M4.9 4.9l2.1 2.1m10 10 2.1 2.1m0-14.2-2.1 2.1m-10 10-2.1 2.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
       الإعدادات
@@ -197,8 +207,11 @@
 
   <div class="err" id="errBox"><b id="errTitle">خطأ</b><span id="errMsg"></span></div>
 
-  <!-- ================= 1) حساب Google ================= -->
-  <div class="card" id="cardAuth">
+  <div class="modebar">
+    <button class="btn ghost" id="btnMode">وضع: Google OAuth</button>
+    <span class="hint" id="modeHint">اربط حساب Google أو بدّل إلى وضع مفتاح البث اليدوي</span>
+  </div>
+<div class="card" id="authCard">
     <h2><span class="num">1</span> حساب Google <span class="st" id="stAuth">غير مربوط</span></h2>
     <div id="authOff">
       <p class="hint" style="margin:0 0 14px">اربط حسابك لاختيار قناتك على YouTube والبث عليها مباشرة.
@@ -380,5 +393,55 @@
 
 <div class="toast" id="toast"></div>
 <script src="app.js"></script>
+
+<!-- ★ نافذة وضع الاتصال -->
+<div class="modal" id="modalMode">
+  <div class="box">
+    <h2>طريقة الاتصال بـ YouTube</h2>
+
+    <div class="radios">
+      <label class="radio">
+        <input type="radio" name="mode" value="oauth">
+        <div>
+          <b>Google OAuth (الرسمي)</b>
+          <div class="hint">يربط حسابك وينشئ البث تلقائياً — يحتاج إعداداً مرة واحدة</div>
+        </div>
+      </label>
+      <label class="radio">
+        <input type="radio" name="mode" value="manual">
+        <div>
+          <b>مفتاح بث يدوي (الأسرع)</b>
+          <div class="hint">تنسخ مفتاح البث من YouTube Studio — بلا ربط ولا انتظار</div>
+        </div>
+      </label>
+    </div>
+
+    <div class="grid" style="margin-top:16px">
+      <div>
+        <label class="f">رابط الاستقبال (RTMP)</label>
+        <input type="text" id="inRtmpAddr" dir="ltr" value="rtmp://a.rtmp.youtube.com/live2">
+      </div>
+      <div>
+        <label class="f">مفتاح البث (Stream Key)</label>
+        <input type="password" id="inStreamKey" dir="ltr" placeholder="الصق مفتاح البث هنا">
+        <div class="hint" id="streamKeyHint" style="margin-top:6px">—</div>
+      </div>
+    </div>
+
+    <p class="hint" style="margin-top:14px;line-height:2">
+      <b>كيف تجد مفتاح البث؟</b> YouTube Studio ← بث مباشر ← أنشئ بثاً ← إعدادات البث ←
+      «مفتاح البث». الصقه هنا. انقر «نسخ».
+    </p>
+    <p class="hint" style="color:#ffb4b4">
+      ⚠️ المفتاح سرّي — يُخزَّن محلياً على جهازك فقط ولا يُرسل لأي طرف آخر ولا يظهر في السجل.
+      لا تشاركه ولا تضع صورة له على الإنترنت.
+    </p>
+
+    <div class="foot">
+      <button class="btn ghost" id="btnModeCancel" onclick="document.getElementById('modalMode').classList.remove('on')">إلغاء</button>
+      <button class="btn primary" id="btnModeSave">حفظ</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>

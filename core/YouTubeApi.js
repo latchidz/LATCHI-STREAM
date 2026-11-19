@@ -153,6 +153,33 @@ class YouTubeApi {
   }
 
   // ---------------- البث ----------------
+  // ★★★ وضع مفتاح البث اليدوي — بديل كامل لـ OAuth
+  // المستخدم ينسخ من YouTube Studio ← بث مباشر ← إعدادات ← «مفتاح البث»،
+  // ويُدخل رابط الاستقبال (rtmp://a.rtmp.youtube.com/live2) + المفتاح.
+  // لا يحتاج OAuth ولا API ولا انتظار. مفيد إن كان ربط Google معطّلاً لأي سبب.
+  static buildManualRtmp(address, key) {
+    const a = String(address || '').trim();
+    const k = String(key || '').trim();
+    if (!a || !k) return '';
+    // لو المستخدم لصق الرابط كاملاً (يشمل المفتاح) نستعمله كما هو
+    if (/\/[^/]+$/.test(a) && !a.endsWith('/live2') && !a.endsWith('/live2/')) {
+      if (a.split('/').pop() === k) return a;
+    }
+    return a.replace(/\/+$/, '') + '/' + k.replace(/^\/+/, '');
+  }
+
+  // تحقّق سريع من الشكل قبل محاولة الاتصال (رسائل أوضح من فشل ffmpeg الغامض)
+  static validateManualRtmp(address, key) {
+    const a = String(address || '').trim();
+    const k = String(key || '').trim();
+    if (!a) return { ok: false, error: 'رابط الاستقبال (RTMP) مطلوب — مثال: rtmp://a.rtmp.youtube.com/live2' };
+    if (!/^rtmps?:\/\//i.test(a)) return { ok: false, error: 'رابط الاستقبال يجب أن يبدأ بـ rtmp:// أو rtmps://' };
+    if (!k) return { ok: false, error: 'مفتاح البث (Stream Key) مطلوب' };
+    if (/\s/.test(k)) return { ok: false, error: 'مفتاح البث لا يحتوي مسافات — أعد نسخه كاملاً' };
+    if (k.length < 8) return { ok: false, error: 'مفتاح البث يبدو ناقصاً (أقل من 8 أحرف)' };
+    return { ok: true };
+  }
+
   async createBroadcast(opt) {
     const o = opt || {};
     const title = String(o.title || 'LATCHI STREAM').slice(0, 100);

@@ -1,5 +1,5 @@
 // ==============================================================================================
-// LATCHI STREAM 4.1.0  -  بث فيديوهات محلية إلى YouTube
+// LATCHI STREAM 4.2.0  -  بث فيديوهات محلية إلى YouTube
 // ----------------------------------------------------------------------------------------------
 // المبدأ: Local Video File → FFmpeg → YouTube Live RTMP
 // • تسجيل دخول Google OAuth (PKCE) في متصفح النظام — لا متصفح مدمج.
@@ -96,6 +96,11 @@ let settings = {
 
 function loadAll() {
   try { if (fs.existsSync(settingsFile())) Object.assign(settings, JSON.parse(fs.readFileSync(settingsFile(), 'utf8'))); } catch (e) {}
+  // ★★★ وضع الاتصال: 'oauth' (رسمي) أو 'manual' (مفتاح بث يدوي)
+  if (!settings.streamMode) settings.streamMode = 'oauth';
+  if (settings.manualRtmpAddress === undefined) settings.manualRtmpAddress = 'rtmp://a.rtmp.youtube.com/live2';
+  if (settings.manualStreamKey === undefined) settings.manualStreamKey = '';
+
   // Client ID: معرّف مدمج افتراضي (ليس سراً) + إمكانية تجاوزه من الإعدادات أو المتغيّر
   settings.clientId = require(path.join(__dirname, 'core', 'OAuth.js')).defaultClientId() || '';
   try {
@@ -195,6 +200,8 @@ function stateForUi() {
     tools: { ffmpeg: !!FFMPEG, ffprobe: !!FFPROBE },
     auth: auth ? auth.profile() : { connected: false },
     clientConfigured: !!(auth && auth.configured()),
+    streamMode: String(settings.streamMode || 'oauth'),
+    manualReady: !!(String(settings.manualStreamKey || '').trim() && String(settings.manualRtmpAddress || '').trim()),
     clientIdTail: (settings.clientId || '').slice(0, 22) + '…' + (settings.clientId || '').slice(-14),
     embeddedClient: (settings.clientId || '') === (require(path.join(__dirname, 'core', 'OAuth.js')).defaultClientId() || ''),
     settings: {
@@ -292,15 +299,27 @@ async function startLive(input) {
     const info = (live.video && live.video.file === settings.videoPath) ? live.video : await analyzeVideo(settings.videoPath);
     if (!info || !info.ok) return fail((info && info.error) || 'تعذّر فحص الفيديو');
 
-    // 2) تيار RTMP
-    log('جارٍ تجهيز تيار البث على YouTube…');
-    const st = await yt.ensureLiveStream('LATCHI STREAM');
-    if (!st.ok) return fail(st.error || 'تعذّر إنشاء تيار RTMP');
-    live.stream = st.stream;
-    log('تيار RTMP جاهز: ' + st.stream.ingestionAddress + (st.reused ? ' (مُعاد استعماله)' : ' (جديد)'), 'ok');
+    // 2) ★ وضع المفتاح اليدوي: لا OAuth ولا API — نبني رابط RTMP مباشرة
+    let rtmpTarget = '';
+    if (isManual()) {
+      const chk = yt.constructor.validateManualRtmp(settings.manualRtmpAddress, settings.manualStreamKey);
+      if (!chk.ok) return fail(chk.error);
+      rtmpTarget = yt.constructor.buildManualRtmp(settings.manualRtmpAddress, settings.manualStreamKey);
+      live.stream = { id: 'manual', ingestionAddress: settings.manualRtmpAddress, streamName: '(مخفي)' };
+      log('وضع المفتاح اليدوي: ' + String(settings.manualRtmpAddress).trim(), 'ok');
+      log('(المفتاح مخزّن محلياً فقط ولا يظهر في السجل)', 'warn');
+    } else {
+      log('جارٍ تجهيز تيار البث على YouTube…');
+      const st = await yt.ensureLiveStream('LATCHI STREAM');
+      if (!st.ok) return fail(st.error || 'تعذّر إنشاء تيار RTMP');
+      live.stream = st.stream;
+      log('تيار RTMP جاهز: ' + st.stream.ingestionAddress + (st.reused ? ' (مُعاد استعماله)' : ' (جديد)'), 'ok');
+    }
 
-    // 3) البث
-    const br = await yt.createBroadcast({
+    // 3) البث (OAuth فقط) — في الوضع اليدوي البث مُعدّ مسبقاً في YouTube Studio
+    let br = null;
+    if (!isManual()) {
+    br = await yt.createBroadcast({
       title: settings.title, description: settings.description, privacy: settings.privacy,
       madeForKids: settings.madeForKids, categoryId: settings.categoryId
     });
@@ -313,15 +332,17 @@ async function startLive(input) {
     if (!bind.ok) return fail(bind.error || 'تعذّر ربط البث بالتيار');
     log('تم ربط البث بالتيار (bind)', 'ok');
 
-    // 5) صورة مصغّرة (اختياري، لا يُفشل البث)
-    if (settings.thumbnail && fs.existsSync(settings.thumbnail)) {
+    } // نهاية فرع OAuth
+
+    // 5) صورة مصغّرة (اختياري، لا يُفشل البث) — تحتاج API ⇒ OAuth فقط
+    if (br && settings.thumbnail && fs.existsSync(settings.thumbnail)) {
       const th = await yt.setThumbnail(br.broadcast.id, settings.thumbnail);
       if (th.ok) log('تم رفع الصورة المصغّرة', 'ok');
       else log('تعذّر رفع الصورة المصغّرة: ' + th.error, 'warn');
     }
 
     // 6) تشغيل ffmpeg
-    const rtmp = yt.rtmpUrl(st.stream, false);
+    const rtmp = isManual() ? rtmpTarget : yt.rtmpUrl(st.stream, false);
     const pf = progressFile();
     try { fs.writeFileSync(pf, ''); } catch (e) {}
 
@@ -346,11 +367,50 @@ async function startLive(input) {
     startProgressTimer();
     startHealthTimer();
     pushState();
-    log('بدأ إرسال الفيديو إلى YouTube…', 'ok');
-    return { ok: true, broadcast: live.broadcast, stream: { id: live.stream.id } };
+    log('بدأ إرسال الفيديو… جارٍ التحقق من وصول البيانات', 'ok');
+
+    // ★ تحقّق فعلي: إن لم يتحرك مؤشر الوقت خلال 6 ثوانٍ فالاتصال لم ينجح
+    //   (مفتاح خاطئ / بث غير مُفعّل / شبكة محجوبة). لا ندّعي نجاحاً بلا دليل.
+    live.verifying = true;
+    pushState();
+    const probe = await probeIngestAlive(2500, 7000);
+    live.verifying = false;
+    if (!probe.ok) {
+      try { engine.stop(); } catch (e) {}
+      return fail('لم تُرسل أي بيانات إلى خادم YouTube خلال 7 ثوانٍ — تحقق من مفتاح البث وأن البث «مُفعّل» في YouTube Studio، ومن اتصال الإنترنت.');
+    }
+    log('تأكيد: البيانات تصل إلى YouTube (أُرسل ' + probe.seconds.toFixed(1) + ' ثانية من الفيديو)', 'ok');
+    pushState();
+    return { ok: true, broadcast: live.broadcast, stream: { id: live.stream.id }, verified: true, sentSeconds: probe.seconds };
   } catch (e) {
     return fail('خطأ غير متوقع: ' + (e && e.message));
   }
+}
+
+// هل نعمل بوضع المفتاح اليدوي؟
+function isManual() {
+  return String(settings.streamMode || 'oauth') === 'manual';
+}
+
+// ★ فحص بثّ حقيقي: هل يصل البيانات إلى خادم YouTube فعلاً؟
+//   ffmpeg بنسخ -c copy لا يطبع frame= فنتحقق من تحرّك مؤشر الوقت في ملف التقدم.
+async function probeIngestAlive(minMs, maxMs) {
+  const step = 400;
+  const t0 = Date.now();
+  let last = -1, moved = 0;
+  const pf = progressFile();
+  while (Date.now() - t0 < maxMs) {
+    let txt = '';
+    try { txt = fs.readFileSync(pf, 'utf8'); } catch (e) { txt = ''; }
+    // ★ ffmpeg يكتب كتلة progress كل ثانية (progress=continue لكل واحدة)
+    //   والقيمة الصحيحة هي **آخر** out_time_ms وليس أولها — أخذ الأولى يعطي رقماً عالقاً.
+    const all = txt.match(/out_time_ms=(\d+)/g) || [];
+    const v = all.length ? Number(all[all.length - 1].split('=')[1]) / 1000 : 0;
+    if (v > last + 100) { moved += (v - Math.max(last, 0)); last = v; }
+    if (last > 0 && Date.now() - t0 >= minMs) return { ok: true, seconds: last / 1000 };
+    await new Promise(r => setTimeout(r, step));
+  }
+  return { ok: false, seconds: Math.max(0, last) / 1000 };
 }
 
 function fail(msg) {
@@ -505,6 +565,25 @@ function ipc() {
       }
     }
     return r;
+  });
+  // ★ حفظ/قراءة وضع الاتصال ومفتاح البث اليدوي
+  ipcMain.handle('settings:getStreamMode', async () => ({
+    ok: true,
+    mode: String(settings.streamMode || 'oauth'),
+    address: String(settings.manualRtmpAddress || 'rtmp://a.rtmp.youtube.com/live2'),
+    hasKey: !!String(settings.manualStreamKey || '').trim(),
+    keyTail: (function () { const k = String(settings.manualStreamKey || ''); return k ? ('…' + k.slice(-4)) : ''; })()
+  }));
+  ipcMain.handle('settings:setStreamMode', async (e, p) => {
+    const mode = String((p && p.mode) || 'oauth') === 'manual' ? 'manual' : 'oauth';
+    settings.streamMode = mode;
+    if (p && typeof p.address === 'string' && p.address.trim()) settings.manualRtmpAddress = p.address.trim();
+    if (p && typeof p.key === 'string' && p.key.trim()) settings.manualStreamKey = p.key.replace(/\s+/g, '');
+    if (p && p.clearKey) settings.manualStreamKey = '';
+    saveSettings();
+    log('وضع الاتصال: ' + (mode === 'manual' ? 'مفتاح بث يدوي' : 'Google OAuth'), 'ok');
+    pushState();
+    return { ok: true, mode };
   });
   ipcMain.handle('auth:resetClientId', async () => {
     try { if (fs.existsSync(clientsFile())) fs.unlinkSync(clientsFile()); } catch (e) {}

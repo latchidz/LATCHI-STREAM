@@ -155,14 +155,20 @@ function render(st) {
 
   // تلميح البدء
   const missing = [];
-  if (!authOk) missing.push('ربط الحساب');
-  if (!ch) missing.push('اختيار القناة');
+  const manual = (st.streamMode === 'manual');
+  if (!manual) {
+    if (!authOk) missing.push('ربط الحساب');
+    if (!ch) missing.push('اختيار القناة');
+  } else if (!st.manualReady) {
+    missing.push('مفتاح البث');
+  }
   if (!v) missing.push('اختيار الفيديو');
   if (!st.tools.ffmpeg) missing.push('ffmpeg');
   if (!st.tools.ffprobe) missing.push('ffprobe');
   $('#startHint').textContent = missing.length ? ('ينقص: ' + missing.join(' · ')) : 'كل شيء جاهز — اضغط START LIVE STREAM';
 
   renderClientInfo();
+  renderStreamMode();
 
   // أخطاء
   if (st.error && phase === 'error') showErr('فشل البث', st.error);
@@ -248,6 +254,25 @@ function wire() {
       refresh();
     }
   });
+  // ---- وضع الاتصال ----
+  const btnMode = document.querySelector('#btnMode');
+  if (btnMode) btnMode.addEventListener('click', async () => {
+    const st = await L.getStreamMode();
+    $('#inRtmpAddr').value = st.address || 'rtmp://a.rtmp.youtube.com/live2';
+    $('#inStreamKey').value = '';
+    $('#streamKeyHint').textContent = st.hasKey ? ('مفتاح محفوظ ' + st.keyTail + ' — اتركه فارغاً للإبقاء عليه') : 'لم يُحفظ مفتاح بعد';
+    document.querySelectorAll('input[name="mode"]').forEach(r => { r.checked = (r.value === (st.mode || 'oauth')); });
+    $('#modalMode').classList.add('on');
+  });
+
+  const btnModeSave = document.querySelector('#btnModeSave');
+  if (btnModeSave) btnModeSave.addEventListener('click', async () => {
+    const mode = (document.querySelector('input[name="mode"]:checked') || {}).value || 'oauth';
+    const key = $('#inStreamKey').value.trim();
+    const r = await L.setStreamMode({ mode, address: $('#inRtmpAddr').value.trim(), key: key || undefined });
+    if (r && r.ok) { toast('حُفظ وضع الاتصال ✓'); $('#modalMode').classList.remove('on'); await refresh(); }
+  });
+
   $('#btnOauthSave').addEventListener('click', async () => {
     const id = $('#inClientId').value.trim();
     const r = await L.setClientId(id);
@@ -341,6 +366,27 @@ function wire() {
 
   L.onState(render);
   L.onLog(addLog);
+}
+
+// ★★★ واجهة وضع الاتصال (OAuth / مفتاح يدوي)
+function renderStreamMode() {
+  if (!S) return;
+  const manual = S.streamMode === 'manual';
+  const btnMode = document.querySelector('#btnMode');
+  if (btnMode) {
+    btnMode.textContent = manual ? 'وضع: مفتاح بث يدوي' : 'وضع: Google OAuth';
+    btnMode.classList.toggle('primary', manual);
+  }
+  const card = document.querySelector('#authCard');
+  if (card) card.style.opacity = manual ? '.45' : '1';
+  const hint = document.querySelector('#modeHint');
+  if (hint) {
+    hint.textContent = manual
+      ? ('مفتاح البث محفوظ ' + (S.manualReady ? '(✓ جاهز)' : '(ناقص)') + ' — لا تحتاج ربط Google')
+      : 'اربط حساب Google أو بدّل إلى وضع مفتاح البث اليدوي';
+  }
+  const keyInfo = document.querySelector('#keyInfo');
+  if (keyInfo) keyInfo.textContent = S.manualReady ? 'مفتاح البث: محفوظ ✓' : 'مفتاح البث: غير مضبوط';
 }
 
 function renderClientInfo() {

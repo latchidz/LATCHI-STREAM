@@ -35,6 +35,16 @@ console.log('\n=== 1) Google OAuth (PKCE + Desktop Flow) ===');
     return off === '';
   })());
   t('describeError يُظهر سبب جوجل الحقيقي', OAuth.describeError(400, JSON.stringify({error:'invalid_request', error_description:'Missing code_verifier'})).message.includes('Missing code_verifier'));
+  // ★★★ وضع مفتاح البث اليدوي
+  const YTC = require(path.join(ROOT, 'core', 'YouTubeApi.js')).YouTubeApi;
+  t('buildManualRtmp يدمج الرابط والمفتاح',
+    YTC.buildManualRtmp('rtmp://a.rtmp.youtube.com/live2', 'ab-12-cd-34') === 'rtmp://a.rtmp.youtube.com/live2/ab-12-cd-34');
+  t('buildManualRtmp لا يكرر المفتاح إن لُصق الرابط كاملاً',
+    YTC.buildManualRtmp('rtmp://a.rtmp.youtube.com/live2/ab-12-cd-34', 'ab-12-cd-34') === 'rtmp://a.rtmp.youtube.com/live2/ab-12-cd-34');
+  t('buildManualRtmp يرفض الناقص', YTC.buildManualRtmp('rtmp://x/live2', '') === '');
+  t('validateManualRtmp يرفض رابطاً غير RTMP', YTC.validateManualRtmp('https://youtube.com', 'abcdefgh').ok === false);
+  t('validateManualRtmp يرفض مفتاحاً بمسافات', YTC.validateManualRtmp('rtmp://x/live2', 'ab cd efgh').ok === false);
+  t('validateManualRtmp يقبل السليم', YTC.validateManualRtmp('rtmp://x/live2', 'abcdefgh').ok === true);
   t('describeError يفهم شكل الكائن', OAuth.describeError(401, JSON.stringify({error:{status:'UNAUTHENTICATED', message:'Bad', errors:[{reason:'authError'}]}})).code === 'UNAUTHENTICATED');
   t('PKCE challenge = S256 base64url', c.length === 43 && /^[A-Za-z0-9_-]+$/.test(c));
   t('verifier مختلف كل مرة', OAuth.makeVerifier() !== v);
@@ -269,7 +279,7 @@ function fakeAuth(handler) {
   // ------------------------------------------------------------------ 10) الأمان
   console.log('\n=== 10) الأمان ===');
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  t('الإصدار 4.1.0', pkg.version === '4.1.0', pkg.version);
+  t('الإصدار 4.2.0', pkg.version === '4.2.0', pkg.version);
   t('contextIsolation مفعّل', /contextIsolation:\s*true/.test(mainjs));
   t('nodeIntegration معطّل', /nodeIntegration:\s*false/.test(mainjs));
   t('preload يستخدم contextBridge', /contextBridge\.exposeInMainWorld/.test(fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8')));

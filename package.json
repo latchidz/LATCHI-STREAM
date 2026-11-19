@@ -1,7 +1,7 @@
 {
   "name": "latchi-stream",
   "productName": "LATCHI STREAM",
-  "version": "4.1.0",
+  "version": "4.2.0",
   "description": "LATCHI STREAM — بث فيديوهات محلية إلى YouTube مباشرة (Google OAuth + FFmpeg + RTMP)",
   "author": "LATCHI",
   "license": "UNLICENSED",
