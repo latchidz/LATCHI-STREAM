@@ -188,7 +188,7 @@
       <p>بث فيديوهات محلية إلى YouTube مباشرة</p>
     </div>
     <div class="hspacer"></div>
-    <span class="vbadge" id="verBadge">v4.0.1</span>
+    <span class="vbadge" id="verBadge">v4.1.0</span>
     <button class="btn sm ghost" id="btnSettings" title="الإعدادات">
       <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.7"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M4.9 4.9l2.1 2.1m10 10 2.1 2.1m0-14.2-2.1 2.1m-10 10-2.1 2.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
       الإعدادات
@@ -361,9 +361,17 @@
       <div>
         <label class="f">Google OAuth Client ID</label>
         <input type="text" id="inClientId" placeholder="1234567890-abc123.apps.googleusercontent.com" dir="ltr">
+        <div class="hint" id="clientInfo" style="margin-top:7px">—</div>
       </div>
     </div>
+    <p class="hint" style="margin-top:12px;line-height:2">
+      <b>ملاحظة مهمة:</b> المعرّف مدمج في التطبيق ولا تحتاج إدخاله.<br>
+      إن ظهر خطأ <code>redirect_uri_mismatch</code> أو <code>invalid_client</code>، افتح
+      Google Cloud Console ← بيانات الاعتماد ← عميلك ← تأكد أن النوع <b>Desktop app</b>،
+      وأضف <code>http://127.0.0.1</code> في «Authorized redirect URIs».
+    </p>
     <div class="foot">
+      <button class="btn ghost" id="btnOauthReset">إرجاع المعرّف المدمج</button>
       <button class="btn ghost" id="btnOauthCancel">إلغاء</button>
       <button class="btn primary" id="btnOauthSave">حفظ</button>
     </div>

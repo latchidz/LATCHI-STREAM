@@ -1,6 +1,6 @@
 'use strict';
 // ==============================================================================================
-// LATCHI STREAM 4.0.1 — واجهة بث الفيديوهات المحلية
+// LATCHI STREAM 4.1.0 — واجهة بث الفيديوهات المحلية
 // لا معاينة، لا التقاط شاشة، لا متصفح مدمج. كل زر مربوط بوظيفة حقيقية في العملية الرئيسية.
 // ==============================================================================================
 
@@ -162,6 +162,8 @@ function render(st) {
   if (!st.tools.ffprobe) missing.push('ffprobe');
   $('#startHint').textContent = missing.length ? ('ينقص: ' + missing.join(' · ')) : 'كل شيء جاهز — اضغط START LIVE STREAM';
 
+  renderClientInfo();
+
   // أخطاء
   if (st.error && phase === 'error') showErr('فشل البث', st.error);
   else hideErr();
@@ -219,7 +221,12 @@ function wire() {
       await refresh();
       await loadChannels();
       loadCategories();
-    } else showErr('فشل ربط الحساب', r.error || 'خطأ غير معروف');
+    } else {
+      const extra = r.detail ? ' — ' + r.detail : '';
+      const code = r.code ? ' [' + r.code + ']' : '';
+      showErr('فشل ربط الحساب', (r.error || 'خطأ غير معروف') + code + extra);
+      addLog('[err] فشل الربط' + code + ': ' + (r.error || '') + extra);
+    }
   });
   $('#btnDisconnect').addEventListener('click', async () => {
     await L.disconnect();
@@ -232,6 +239,15 @@ function wire() {
   $('#btnSetupOauth').addEventListener('click', () => $('#modalOauth').classList.add('on'));
   $('#btnSettings').addEventListener('click', () => $('#modalOauth').classList.add('on'));
   $('#btnOauthCancel').addEventListener('click', () => $('#modalOauth').classList.remove('on'));
+  const btnReset = document.querySelector('#btnOauthReset');
+  if (btnReset) btnReset.addEventListener('click', async () => {
+    const r = await L.resetClientId();
+    if (r && r.ok) {
+      $('#inClientId').value = r.clientId || '';
+      toast('أُعيد Client ID المدمج ✓');
+      refresh();
+    }
+  });
   $('#btnOauthSave').addEventListener('click', async () => {
     const id = $('#inClientId').value.trim();
     const r = await L.setClientId(id);
@@ -325,6 +341,16 @@ function wire() {
 
   L.onState(render);
   L.onLog(addLog);
+}
+
+function renderClientInfo() {
+  if (!S) return;
+  const el = document.querySelector('#clientInfo');
+  if (!el) return;
+  el.textContent = S.clientConfigured
+    ? ('المعرّف الحالي: ' + (S.clientIdTail || '—') + (S.embeddedClient ? '  (مدمج في التطبيق)' : '  (مخصّص)'))
+    : 'لا يوجد Client ID بعد';
+  el.style.color = S.clientConfigured ? '#7ee2a2' : '#ffb4b4';
 }
 
 async function loadCategories() {

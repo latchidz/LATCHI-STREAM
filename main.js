@@ -1,5 +1,5 @@
 // ==============================================================================================
-// LATCHI STREAM 4.0.1  -  بث فيديوهات محلية إلى YouTube
+// LATCHI STREAM 4.1.0  -  بث فيديوهات محلية إلى YouTube
 // ----------------------------------------------------------------------------------------------
 // المبدأ: Local Video File → FFmpeg → YouTube Live RTMP
 // • تسجيل دخول Google OAuth (PKCE) في متصفح النظام — لا متصفح مدمج.
@@ -96,14 +96,14 @@ let settings = {
 
 function loadAll() {
   try { if (fs.existsSync(settingsFile())) Object.assign(settings, JSON.parse(fs.readFileSync(settingsFile(), 'utf8'))); } catch (e) {}
-  // Client ID: من ملف منفصل (لا يُحزَّم)
+  // Client ID: معرّف مدمج افتراضي (ليس سراً) + إمكانية تجاوزه من الإعدادات أو المتغيّر
+  settings.clientId = require(path.join(__dirname, 'core', 'OAuth.js')).defaultClientId() || '';
   try {
     if (fs.existsSync(clientsFile())) {
       const j = JSON.parse(fs.readFileSync(clientsFile(), 'utf8'));
       if (j && j.clientId) settings.clientId = String(j.clientId);
     }
   } catch (e) {}
-  if (process.env.LATCHI_GOOGLE_CLIENT_ID) settings.clientId = process.env.LATCHI_GOOGLE_CLIENT_ID;
 }
 function saveSettings() {
   try { fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2)); } catch (e) {}
@@ -195,6 +195,8 @@ function stateForUi() {
     tools: { ffmpeg: !!FFMPEG, ffprobe: !!FFPROBE },
     auth: auth ? auth.profile() : { connected: false },
     clientConfigured: !!(auth && auth.configured()),
+    clientIdTail: (settings.clientId || '').slice(0, 22) + '…' + (settings.clientId || '').slice(-14),
+    embeddedClient: (settings.clientId || '') === (require(path.join(__dirname, 'core', 'OAuth.js')).defaultClientId() || ''),
     settings: {
       title: settings.title, description: settings.description, privacy: settings.privacy,
       madeForKids: settings.madeForKids, categoryId: settings.categoryId, thumbnail: settings.thumbnail,
@@ -484,10 +486,34 @@ function ipc() {
   // ---- OAuth ----
   ipcMain.handle('auth:connect', async () => {
     if (!auth.configured()) return { ok: false, error: 'أضف Google OAuth Client ID أولاً (زر الإعدادات)' };
+    log('بدأ الربط: يُفتح متصفح النظام…');
     const r = await auth.connect();
-    if (r.ok) { log('تم ربط حساب Google: ' + (r.profile.email || ''), 'ok'); pushState(); }
-    else log('فشل الربط: ' + r.error, 'err');
+    if (r.ok) {
+      log('تم ربط حساب Google: ' + (r.profile.email || ''), 'ok');
+      const ch = await yt.listChannels();
+      if (!ch.ok) log('تنبيه: تعذّر جلب القنوات — ' + ch.error, 'warn');
+      else log('عدد القنوات المتاحة: ' + ch.channels.length, 'ok');
+      pushState();
+    } else {
+      log('فشل الربط [' + (r.code || '?') + ']: ' + r.error, 'err');
+      if (/redirect_uri_mismatch/.test(r.code || '')) {
+        log('الحل: في Google Cloud Console ← بيانات الاعتماد ← افتح الـ OAuth client ← أضف ' +
+            'http://127.0.0.1 إلى Authorized redirect URIs (أو أعد إنشاء العميل من نوع Desktop app).', 'warn');
+      }
+      if (/invalid_client|unauthorized_client/.test(r.code || '')) {
+        log('الحل: تأكد أن نوع العميل «Desktop app» وليس «Web application»، وأن المشروع يطابق الـ Client ID.', 'warn');
+      }
+    }
     return r;
+  });
+  ipcMain.handle('auth:resetClientId', async () => {
+    try { if (fs.existsSync(clientsFile())) fs.unlinkSync(clientsFile()); } catch (e) {}
+    const def = require(path.join(__dirname, 'core', 'OAuth.js')).defaultClientId() || '';
+    settings.clientId = def;
+    if (auth) auth.clientId = def;
+    pushState();
+    log('أُعيد Client ID إلى المعرّف المدمج', 'ok');
+    return { ok: true, clientId: def };
   });
   ipcMain.handle('auth:disconnect', async () => {
     await auth.disconnect();
@@ -634,6 +660,7 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     loadAll();
     Menu.setApplicationMenu(null);
+    if (auth.configured()) log('Google Client ID: ' + (settings.clientId || '').slice(0, 20) + '…' + (settings.clientId || '').slice(-12));
     log('LATCHI STREAM v' + APP_VERSION + ' — ' + (process.windowsStore ? 'Store' :
         (process.env.PORTABLE_EXECUTABLE_DIR ? 'نسخة محمولة' : 'نسخة مثبّتة')) + ' · ' + process.platform);
 

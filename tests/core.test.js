@@ -26,6 +26,16 @@ console.log('\n=== 1) Google OAuth (PKCE + Desktop Flow) ===');
   const v = OAuth.makeVerifier();
   const c = OAuth.challengeFor(v);
   t('PKCE verifier طويل وعشوائي', v.length >= 43 && /^[A-Za-z0-9_-]+$/.test(v));
+  // ★ Client ID مدمج (لا سر) + إمكانية إلغائه
+  t('Client ID مدمج وصالح الشكل', /^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(OAuth.defaultClientId()), OAuth.defaultClientId().slice(0,20));
+  t('يمكن تعطيل المدمج بمتغيّر بيئة', (() => {
+    process.env.LATCHI_NO_EMBEDDED_CLIENT_ID = '1';
+    const off = OAuth.defaultClientId();
+    delete process.env.LATCHI_NO_EMBEDDED_CLIENT_ID;
+    return off === '';
+  })());
+  t('describeError يُظهر سبب جوجل الحقيقي', OAuth.describeError(400, JSON.stringify({error:'invalid_request', error_description:'Missing code_verifier'})).message.includes('Missing code_verifier'));
+  t('describeError يفهم شكل الكائن', OAuth.describeError(401, JSON.stringify({error:{status:'UNAUTHENTICATED', message:'Bad', errors:[{reason:'authError'}]}})).code === 'UNAUTHENTICATED');
   t('PKCE challenge = S256 base64url', c.length === 43 && /^[A-Za-z0-9_-]+$/.test(c));
   t('verifier مختلف كل مرة', OAuth.makeVerifier() !== v);
   t('الصلاحيات تشمل إدارة البث', OAuth.DEFAULT_SCOPES.some(s => s.includes('/auth/youtube')));
@@ -34,8 +44,10 @@ console.log('\n=== 1) Google OAuth (PKCE + Desktop Flow) ===');
   t('describeError لا يكشف تفاصيل حساسة', OAuth.describeError(400, '{"error":"invalid_grant","error_description":"secret xyz"}').raw === '');
 
   // مدير مصادقة بلا Client ID
+  process.env.LATCHI_NO_EMBEDDED_CLIENT_ID = '1';
   const a1 = new OAuth.GoogleAuth({ clientId: '', file: '' });
-  t('غير مُهيّأ بلا Client ID', a1.configured() === false);
+  t('غير مُهيّأ بلا Client ID (بعد تعطيل المدمج)', a1.configured() === false);
+  delete process.env.LATCHI_NO_EMBEDDED_CLIENT_ID;
   a1.connect().then(r => {
     t('connect يرفض بلا Client ID برسالة واضحة', r.ok === false && /Client ID/.test(r.error), r.error);
   });
@@ -257,7 +269,7 @@ function fakeAuth(handler) {
   // ------------------------------------------------------------------ 10) الأمان
   console.log('\n=== 10) الأمان ===');
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  t('الإصدار 4.0.0', pkg.version === '4.0.1', pkg.version);
+  t('الإصدار 4.1.0', pkg.version === '4.1.0', pkg.version);
   t('contextIsolation مفعّل', /contextIsolation:\s*true/.test(mainjs));
   t('nodeIntegration معطّل', /nodeIntegration:\s*false/.test(mainjs));
   t('preload يستخدم contextBridge', /contextBridge\.exposeInMainWorld/.test(fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8')));

@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('latchi', {
   connect:        ()        => ipcRenderer.invoke('auth:connect'),
   disconnect:     ()        => ipcRenderer.invoke('auth:disconnect'),
   setClientId:    (id)      => ipcRenderer.invoke('auth:setClientId', id),
+  resetClientId:  ()        => ipcRenderer.invoke('auth:resetClientId'),
   authStatus:     ()        => ipcRenderer.invoke('auth:status'),
 
   // القنوات
