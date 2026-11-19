@@ -1,5 +1,5 @@
 // ==============================================================================================
-// LATCHI STREAM 4.0.0  -  بث فيديوهات محلية إلى YouTube
+// LATCHI STREAM 4.0.1  -  بث فيديوهات محلية إلى YouTube
 // ----------------------------------------------------------------------------------------------
 // المبدأ: Local Video File → FFmpeg → YouTube Live RTMP
 // • تسجيل دخول Google OAuth (PKCE) في متصفح النظام — لا متصفح مدمج.
@@ -610,8 +610,23 @@ function selectChannel(ch) {
 }
 
 // ------------------------------------------------------------------ دورة الحياة
+// ★ قفل النسخة الواحدة.
+// ملاحظة مهمة: الإصدارات القديمة (3.x) لها نفس appId وتعمل في الخلفية (Tray)،
+// فتمسك هذا القفل وتُغلق النسخة الجديدة بصمت. لذلك نُظهر تنبيهاً واضحاً بدل الخروج الصامت.
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
+  try {
+    const { dialog: d } = require('electron');
+    app.whenReady().then(() => {
+      d.showMessageBoxSync({
+        type: 'warning',
+        title: 'LATCHI STREAM',
+        message: 'هناك نسخة أخرى من LATCHI STREAM تعمل بالفعل',
+        detail: 'إن لم تظهر نافذتها، فهي مخفية في أيقونة الساعة (Tray) — وقد تكون نسخة قديمة (3.x).\n\n' +
+                'الحل: انقر زر الفأرة الأيمن على أيقونة الساعة واختر «خروج»، أو استعمل ملف «شغّل-التنظيف.cmd» لإزالة النسخة القديمة نهائياً.'
+      });
+    });
+  } catch (e) {}
   app.quit();
 } else {
   app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
@@ -619,6 +634,8 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     loadAll();
     Menu.setApplicationMenu(null);
+    log('LATCHI STREAM v' + APP_VERSION + ' — ' + (process.windowsStore ? 'Store' :
+        (process.env.PORTABLE_EXECUTABLE_DIR ? 'نسخة محمولة' : 'نسخة مثبّتة')) + ' · ' + process.platform);
 
     auth = new GoogleAuth({
       clientId: settings.clientId,
@@ -633,7 +650,10 @@ if (!gotLock) {
     ipc();
     createWindow();
 
-    if (!FFMPEG || !FFPROBE) log('تنبيه: ffmpeg/ffprobe غير متاحين — استخدم «اختيار ffmpeg يدوياً»', 'warn');
+    if (FFMPEG) log('ffmpeg جاهز: ' + FFMPEG);
+    else log('تنبيه: ffmpeg غير متاح — استخدم «اختيار ffmpeg يدوياً» من الواجهة', 'warn');
+    if (FFPROBE) log('ffprobe جاهز: ' + FFPROBE);
+    else log('تنبيه: ffprobe غير متاح — لا يمكن فحص الفيديو', 'warn');
     if (!auth.configured()) log('تنبيه: Google OAuth Client ID غير مضبوط بعد', 'warn');
   });
 

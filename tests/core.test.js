@@ -257,7 +257,7 @@ function fakeAuth(handler) {
   // ------------------------------------------------------------------ 10) الأمان
   console.log('\n=== 10) الأمان ===');
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  t('الإصدار 4.0.0', pkg.version === '4.0.0', pkg.version);
+  t('الإصدار 4.0.0', pkg.version === '4.0.1', pkg.version);
   t('contextIsolation مفعّل', /contextIsolation:\s*true/.test(mainjs));
   t('nodeIntegration معطّل', /nodeIntegration:\s*false/.test(mainjs));
   t('preload يستخدم contextBridge', /contextBridge\.exposeInMainWorld/.test(fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8')));

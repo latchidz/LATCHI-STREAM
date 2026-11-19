@@ -1,4 +1,4 @@
-# LATCHI STREAM v4.0.0 — بث فيديوهات محلية إلى YouTube
+# LATCHI STREAM v4.0.1 — بث فيديوهات محلية إلى YouTube
 
 **تحوّل كامل:** من التقاط الشاشة إلى **بث ملف فيديو محلي** على قناتك في YouTube،
 باستخدام **Google OAuth** و**FFmpeg** و**RTMP**. بلا معاينة، بلا التقاط شاشة، **بلا ميكروفون**.
@@ -73,7 +73,7 @@ npm test          # 98 اختباراً
 
 عبر GitHub Actions: **Actions → Build LATCHI STREAM → Run workflow**.
 
-المخرجات: `LATCHI-STREAM-4.0.0-Setup.exe` و`LATCHI-STREAM-4.0.0-Portable.exe`.
+المخرجات: `LATCHI-STREAM-4.0.1-Setup.exe` و`LATCHI-STREAM-4.0.1-Portable.exe`.
 
 ---
 
