@@ -1,47 +1,42 @@
-// جسر آمن بين الواجهة والتطبيق
+'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('latchi', {
-  info:            ()      => ipcRenderer.invoke('app:info'),
-  getSettings:     ()      => ipcRenderer.invoke('settings:get'),
-  setSettings:     (p)     => ipcRenderer.invoke('settings:set', p),
+  // حالة عامة
+  state:          ()        => ipcRenderer.invoke('app:state'),
+  version:        ()        => ipcRenderer.invoke('app:version'),
 
-  audioList:       ()      => ipcRenderer.invoke('audio:list'),
-  encodersList:    ()      => ipcRenderer.invoke('encoders:list'),
+  // OAuth
+  connect:        ()        => ipcRenderer.invoke('auth:connect'),
+  disconnect:     ()        => ipcRenderer.invoke('auth:disconnect'),
+  setClientId:    (id)      => ipcRenderer.invoke('auth:setClientId', id),
+  authStatus:     ()        => ipcRenderer.invoke('auth:status'),
 
-  keyEmbedded:     ()      => ipcRenderer.invoke('key:embedded'),
-  keyTest:         (k)     => ipcRenderer.invoke('key:test', k),
+  // القنوات
+  listChannels:   ()        => ipcRenderer.invoke('channels:list'),
+  selectChannel:  (id)      => ipcRenderer.invoke('channels:select', id),
+  categories:     ()        => ipcRenderer.invoke('categories:list'),
 
-  previewStart:    (s)     => ipcRenderer.invoke('preview:start', s),
-  previewStop:     ()      => ipcRenderer.invoke('preview:stop'),
-  previewFrame:    ()      => ipcRenderer.invoke('preview:frame'),
+  // الفيديو
+  pickVideo:      ()        => ipcRenderer.invoke('video:pick'),
+  analyzeVideo:   (f)       => ipcRenderer.invoke('video:analyze', f),
+  clearVideo:     ()        => ipcRenderer.invoke('video:clear'),
+  pickThumbnail:  ()        => ipcRenderer.invoke('thumbnail:pick'),
 
-  streamStart:     (s)     => ipcRenderer.invoke('stream:start', s),
-  streamStop:      ()      => ipcRenderer.invoke('stream:stop'),
-  state:           ()      => ipcRenderer.invoke('state:get'),
+  // البث
+  startLive:      (o)       => ipcRenderer.invoke('live:start', o),
+  stopLive:       ()        => ipcRenderer.invoke('live:stop'),
+  liveStatus:     ()        => ipcRenderer.invoke('live:status'),
+  openUrl:        (u)       => ipcRenderer.invoke('live:openUrl', u),
 
-  windowList:      ()      => ipcRenderer.invoke('window:list'),
-  pickWindowMouse: ()      => ipcRenderer.invoke('window:pickByMouse'),
-  defaultFont:     ()      => ipcRenderer.invoke('font:default'),
-  setFullscreen:   (on)    => ipcRenderer.invoke('fullscreen:set', on),
-  pickImage:       ()      => ipcRenderer.invoke('dialog:image'),
-  pickFont:        ()      => ipcRenderer.invoke('dialog:font'),
+  // أدوات
+  toolsStatus:    ()        => ipcRenderer.invoke('tools:status'),
+  pickFfmpeg:     ()        => ipcRenderer.invoke('tools:pickFfmpeg'),
+  openToolsDir:   ()        => ipcRenderer.invoke('tools:openDir'),
+  openExternal:   (u)       => ipcRenderer.invoke('shell:open', u),
+  openUserData:   ()        => ipcRenderer.invoke('app:openUserData'),
 
-  openExternal:    (u)     => ipcRenderer.invoke('shell:open', u),
-  quit:            ()      => ipcRenderer.invoke('app:quit'),
-  quitApp:         ()      => ipcRenderer.invoke('app:quit'),
-  hideToTray:      ()      => ipcRenderer.invoke('window:hide'),
-
-  onLog:           (cb)    => ipcRenderer.on('log', (e, m) => cb(m)),
-  onStreamEnded:   (cb)    => ipcRenderer.on('stream-ended', (e, d) => cb(d)),
-  onStreamRestarting: (cb) => ipcRenderer.on('stream-restarting', (e, d) => cb(d)),
-  onStreamRestarted:  (cb) => ipcRenderer.on('stream-restarted', (e, d) => cb(d)),
-  onBrowserEsc:    (cb)    => ipcRenderer.on('browser-esc', (e, d) => cb(d)),
-
-  // ffmpeg
-  ffmpegStatus:    ()      => ipcRenderer.invoke('ffmpeg:status'),
-  ffmpegRetry:     ()      => ipcRenderer.invoke('ffmpeg:retry'),
-  ffmpegPick:      ()      => ipcRenderer.invoke('ffmpeg:pick'),
-  ffmpegOpenDir:   ()      => ipcRenderer.invoke('ffmpeg:openDir'),
-  onFfmpegReady:   (cb)    => ipcRenderer.on('ffmpeg-ready', (e, d) => cb(d))
+  // أحداث
+  onState:        (cb)      => ipcRenderer.on('state', (e, d) => cb(d)),
+  onLog:          (cb)      => ipcRenderer.on('log', (e, m) => cb(m))
 });

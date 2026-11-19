@@ -1,16 +1,9 @@
-# تبعيات وأحجام كبيرة — لا تُرفع أبداً
 node_modules/
 dist/
 out/
 build/
-*.zip
-*.7z
-*.exe
-!resources/ffmpeg/.gitkeep
-
-# ملفات حالة ومؤقتات
 *.log
-.pytest_cache/
-__pycache__/
-.DS_Store
-Thumbs.db
+resources/ffmpeg/*.exe
+oauth.json
+oauth-client.json
+settings.json

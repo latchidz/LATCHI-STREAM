@@ -1,1062 +1,651 @@
 // ==============================================================================================
-// LATCHI STREAM 3.2.1  -  تطبيق حاسوب حقيقي (Electron)  -  العملية الرئيسية
+// LATCHI STREAM 4.0.0  -  بث فيديوهات محلية إلى YouTube
 // ----------------------------------------------------------------------------------------------
-// كل شيء داخل نافذة التطبيق: لا متصفح خارجي، لا خادم ويب، لا منفذ مفتوح.
-// المعاينة، القص، الزوم، البانر، العنوان، والبث الفعلي إلى يوتيوب كلها هنا.
-// جديد 3.2.0: نظام ffmpeg مضاد للفشل (المجلد الدائم + استثناء Defender + لوحة إصلاح)،
-//             أوضاع شاشة سريعة (fast/fastlight) للمعالجات الضعيفة مثل Celeron N3060.
-// 3.1.0: البث في الخلفية (إخفاء النافذة لا يوقف البث)، أيقونة Tray بمشغّل بث،
-//             إعادة اتصال تلقائي عند الانقطاع، مانع سكون، متصفح مدمج بشاشة كاملة + ESC ×2.
+// المبدأ: Local Video File → FFmpeg → YouTube Live RTMP
+// • تسجيل دخول Google OAuth (PKCE) في متصفح النظام — لا متصفح مدمج.
+// • إدارة القنوات عبر YouTube Data API (بما فيها القنوات المتعددة وBrand Accounts).
+// • إنشاء البث وربطه بتيار RTMP رسمياً، ثم transition عند الجهوزية.
+// • نسخ مباشر (-c copy) بلا ترميز عند توافق الملف، وإلا ترميز خفيف.
+// • إيقاف تلقائي عند نهاية الملف + إنهاء البث عبر API (لا بث عالق).
+// • لا التقاط شاشة، لا معاينة، لا ميكروفون.
 // ==============================================================================================
 
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage, Tray, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 
-const core = require(path.join(__dirname, 'core', 'LatchiCore.js'));
+const { GoogleAuth } = require(path.join(__dirname, 'core', 'OAuth.js'));
+const { YouTubeApi } = require(path.join(__dirname, 'core', 'YouTubeApi.js'));
+const VideoStream = require(path.join(__dirname, 'core', 'VideoStream.js'));
 
-// نسخة التطبيق: من package.json (لا من نسخة Electron)
-const PKG = (() => { try { return require(path.join(__dirname, 'package.json')); } catch (e) { return { version: '3.0.0' }; } })();
-const APP_VERSION = PKG.version || '3.0.0';
+const PKG = (() => { try { return require(path.join(__dirname, 'package.json')); } catch (e) { return { version: '4.0.0' }; } })();
+const APP_VERSION = PKG.version || '4.0.0';
 
 let win = null;
-let previewProc = null;      // مراقب المعاينة (mjpeg)
-let liveProc = null;         // البث الحي
-let liveStarted = null;
-let liveServer = '';
-let lastError = '';
-let blockedAudio = [];
+let auth = null;
+let yt = null;
+let engine = null;         // StreamEngine
+
 let FFMPEG = null;
-let tray = null;             // أيقونة الخلفية (Tray)
-let quitting = false;        // خروج نهائي حقيقي (من أيقونة الساعة)
-let psBlockerId = null;      // مانع السكون أثناء البث
+let FFPROBE = null;
 
-// مسار مؤقت سريع (لا تخلطه بملفات المستخدم)
-function tmpDir() {
-  // ★ ذاكرة مؤقتة دائمة في %TEMP% (تُفرَّغ تلقائياً) — لا نستهلك قرص المستخدم
-  const d = path.join(os.tmpdir(), 'latchi-stream');
-  try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); } catch (e) {}
-  return d;
-}
-const previewFile  = () => path.join(tmpDir(), 'preview.jpg');
-const progressFile = () => path.join(tmpDir(), 'progress.txt');
+// حالة البث
+const live = {
+  phase: 'idle',           // idle | preparing | connecting | ready | live | stopping | done | error
+  broadcast: null,         // { id, watchUrl, studioUrl, lifecycle }
+  stream: null,            // { id, streamName, ingestionAddress, ... }
+  video: null,             // معلومات الملف
+  startedAt: 0,
+  endedAt: 0,
+  error: '',
+  progress: { frame: 0, fps: 0, bitrate: '', outTimeMs: 0, speed: '', dropFrames: 0 },
+  channel: null,
+  autoStopped: false,
+  lastHealthPolls: 0
+};
 
-// ------------------------------------------------------------------ اكتشاف ffmpeg (نسخة مضادة للفشل)
-// ★ سبب العطل الشهير في النسخة Portable: ffmpeg.exe يُفكّ في %TEMP%\...\resources\ffmpeg
-//   فيمنعه Windows Defender (ASR) من التنفيذ ⇒ spawn ENOENT رغم وجود الملف.
-//   الحل: مسارات دائمة + نسخة في userData\bin + استثناء Defender + تشغيل بمسار مطلق.
-const IS_WIN = process.platform === 'win32';
-const FF_NAME = IS_WIN ? 'ffmpeg.exe' : 'ffmpeg';
-const FF_MIN_BYTES = 1000000;   // أقل من هذا = ملف تالف/ناقص
+const settingsFile = () => path.join(dataDir(), 'settings.json');
+const oauthFile = () => path.join(dataDir(), 'oauth.json');
+const clientsFile = () => path.join(dataDir(), 'oauth-client.json');
 
-function ffBinDir() {
-  const d = path.join(cfgDir(), 'bin');
-  try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); } catch (e) {}
-  return d;
-}
-
-function ffmpegCandidates() {
-  const c = [];
-  // 1) النسخة الدائمة المثبّتة (المفضّلة — خارج %TEMP%)
-  c.push(path.join(ffBinDir(), FF_NAME));
-  c.push(path.join(cfgDir(), FF_NAME));
-  // 2) داخل الحزمة
-  if (process.resourcesPath) c.push(path.join(process.resourcesPath, 'ffmpeg', FF_NAME));
-  c.push(path.join(__dirname, 'resources', 'ffmpeg', FF_NAME));
-  // 3) بجانب التطبيق (نسخة ZIP — المسار المستقر D:\LATCHI)
-  const exeDir = path.dirname(app.getPath('exe'));
-  c.push(path.join(exeDir, FF_NAME));
-  c.push(path.join(exeDir, 'ffmpeg', FF_NAME));
-  c.push(path.join(exeDir, 'resources', 'ffmpeg', FF_NAME));
-  c.push(path.join(exeDir, 'tools', FF_NAME));
-  c.push(path.join(exeDir, 'bin', FF_NAME));
-  // 4) مسارات نظام شائعة
-  if (IS_WIN) {
-    c.push('C:\\ffmpeg\\bin\\ffmpeg.exe');
-    const la = process.env.LOCALAPPDATA;
-    if (la) c.push(path.join(la, 'LatchiStream', 'ffmpeg.exe'));
-  }
-  // 5) PATH
-  const PATH = process.env.PATH || process.env.Path || '';
-  for (const dir of PATH.split(path.delimiter)) {
-    if (dir) c.push(path.join(dir, FF_NAME));
-  }
-  // إزالة التكرار مع حفظ الترتيب
-  const seen = new Set(); const out = [];
-  for (const x of c) { const k = x.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(x); } }
-  return out;
-}
-
-function isUsableFf(p) {
-  try { const st = fs.statSync(p); return st.isFile() && st.size > FF_MIN_BYTES; } catch (e) { return false; }
-}
-
-// تنفيذ فعلي للتحقق: ffmpeg -version ⇒ يجب أن يطبع «ffmpeg version» ويخرج بالكود 0
-function ffmpegWorks(p, timeoutMs) {
-  return new Promise(resolve => {
-    if (!isUsableFf(p)) return resolve({ ok: false, reason: 'الملف مفقود أو صغير جداً', version: '' });
-    let out = '', done = false;
-    let pr;
-    try { pr = spawn(p, ['-hide_banner', '-version'], { windowsHide: true, cwd: tmpDir() }); }
-    catch (e) { return resolve({ ok: false, reason: 'spawn فشل: ' + e.message, version: '' }); }
-    const fin = r => { if (!done) { done = true; clearTimeout(to); resolve(r); } };
-    const to = setTimeout(() => { try { killTree(pr); } catch (e) {} fin({ ok: false, reason: 'انتهت المهلة (' + (timeoutMs||8000) + 'ms) — غالباً منع أمني', version: '' }); }, timeoutMs || 8000);
-    pr.stdout.on('data', d => { out += d.toString(); });
-    pr.stderr.on('data', d => { out += d.toString(); });
-    pr.on('error', e => fin({ ok: false, reason: 'خطأ التنفيذ: ' + (e.code || e.message), version: '' }));
-    pr.on('close', code => {
-      const m = /ffmpeg version\s+(\S+)/i.exec(out);
-      if (code === 0 && m) fin({ ok: true, reason: '', version: m[1] });
-      else fin({ ok: false, reason: 'خرج بالكود ' + code + (m ? '' : ' بلا بصمة إصدار'), version: m ? m[1] : '' });
-    });
-  });
-}
-
-// تثبيت دائم: نسخ ffmpeg إلى userData\bin (خارج %TEMP%) + محاولة استثناء Defender
-function installFfmpegPermanent(src) {
-  try {
-    const dst = path.join(ffBinDir(), FF_NAME);
-    if (path.resolve(src).toLowerCase() !== path.resolve(dst).toLowerCase()) {
-      fs.copyFileSync(src, dst);
-    }
-    // إزالة علامة «ملف من الإنترنت» التي تُفعّل فحص ASR
-    if (IS_WIN) {
-      try {
-        const zone = dst + ':Zone.Identifier';
-        if (fs.existsSync(zone)) fs.unlinkSync(zone);
-      } catch (e) {}
-      // استثناء Defender لمجلدنا (قد يفشل بلا صلاحيات — غير حرج)
-      try {
-        const { execFile } = require('child_process');
-        const cmd = 'Add-MpPreference -ExclusionPath "' + ffBinDir() + '"; Add-MpPreference -ExclusionProcess "' + FF_NAME + '"';
-        execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', cmd],
-          { windowsHide: true, timeout: 15000 }, () => {});
-      } catch (e) {}
-    }
-    return isUsableFf(dst) ? dst : '';
-  } catch (e) { return ''; }
-}
-
-// الاختيار النهائي: أول مرشّح يعمل فعلياً ⇒ انسخه لمسار دائم إن كان في %TEMP%
-async function resolveFfmpeg(force) {
-  const cands = ffmpegCandidates();
-  const permanent = path.join(ffBinDir(), FF_NAME);
-  const inTemp = p => { const t = (os.tmpdir() || '').toLowerCase(); return p.toLowerCase().startsWith(t); };
-
-  for (const c of cands) {
-    if (!isUsableFf(c)) continue;
-    // الموجود في %TEMP% قد يُحجب — نجرّبه أولاً ثم ننسخه
-    const r = await ffmpegWorks(c);
-    if (r.ok) {
-      if (inTemp(c) || path.resolve(c).toLowerCase() !== path.resolve(permanent).toLowerCase()) {
-        const perm = installFfmpegPermanent(c);
-        if (perm) {
-          const r2 = await ffmpegWorks(perm);
-          if (r2.ok) { FFMPEG = perm; return { ok: true, path: perm, version: r2.version, note: 'ثُبّت في مجلد دائم' }; }
-        }
-      }
-      FFMPEG = c;
-      return { ok: true, path: c, version: r.version, note: 'يعمل من مكانه' };
-    }
-  }
-  FFMPEG = null;
-  return { ok: false, path: '', version: '', note: 'لم يُعثر على ffmpeg صالح للتنفيذ' };
-}
-
-// تشغيل ffmpeg بمسار مطلق وبمجلد عمل آمن (يمنع مشاكل %TEMP% والصلاحيات)
-function spawnFfmpeg(args, opts) {
-  const o = Object.assign({ windowsHide: true, cwd: tmpDir(), stdio: ['ignore', 'pipe', 'pipe'] }, opts || {});
-  if (!FFMPEG) return null;
-  try { return spawn(FFMPEG, args, o); } catch (e) { return null; }
-}
-
-async function ffmpegStatus() {
-  const found = ffmpegCandidates().filter(isUsableFf);
-  let version = '';
-  if (FFMPEG) { const r = await ffmpegWorks(FFMPEG, 8000); if (r.ok) version = r.version; else FFMPEG = null; }
-  return {
-    ok: !!FFMPEG,
-    path: FFMPEG || '',
-    version,
-    permanentDir: ffBinDir(),
-    foundCount: found.length,
-    searched: ffmpegCandidates().slice(0, 12)
-  };
-}
-
-// ------------------------------------------------------------------ الإعدادات
-function cfgDir() {
+function dataDir() {
   const d = app.getPath('userData');
   try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); } catch (e) {}
   return d;
 }
-const settingsPath = () => path.join(cfgDir(), 'settings.json');
-
-// مسار البانر الرسمي المرفق بالتطبيق
-function bundledBanner() {
-  const cands = [];
-  if (process.resourcesPath) cands.push(path.join(process.resourcesPath, 'banner-1920x1080.png'));
-  cands.push(path.join(__dirname, 'assets', 'banner-1920x1080.png'));
-  for (const c of cands) { try { if (fs.existsSync(c)) return c; } catch (e) {} }
-  return '';
+function tmpDir() {
+  const d = path.join(os.tmpdir(), 'latchi-stream');
+  try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); } catch (e) {}
+  return d;
 }
+const progressFile = () => path.join(tmpDir(), 'progress.txt');
+const thumbFile = () => path.join(tmpDir(), 'thumb.png');
 
-// خط النظام الافتراضي للعناوين
-function systemFont() {
-  const list = process.platform === 'win32'
-    ? ['C:\\Windows\\Fonts\\segoeuib.ttf', 'C:\\Windows\\Fonts\\arialbd.ttf',
-       'C:\\Windows\\Fonts\\tahomabd.ttf', 'C:\\Windows\\Fonts\\arial.ttf']
-    : ['/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-       '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
-       '/System/Library/Fonts/Helvetica.ttc'];
-  for (const f of list) { try { if (fs.existsSync(f)) return f; } catch (e) {} }
-  return '';
-}
-
-let settings = null;
-function loadSettings() {
-  const def = core.defaultSettings();
-  try {
-    if (fs.existsSync(settingsPath())) {
-      settings = core.mergeSettings(JSON.parse(fs.readFileSync(settingsPath(), 'utf8')), def);
-      return settings;
-    }
-  } catch (e) { /* تجاهل */ }
-  settings = def;
-  return settings;
-}
-
-// يُستدعى بعد loadSettings: يضمن وجود مسار بانر وخط عنوان صالحين
-function ensureAssets() {
-  let changed = false;
-  if (!settings.bannerPath || !fs.existsSync(settings.bannerPath)) {
-    const b = bundledBanner();
-    if (b) { settings.bannerPath = b; changed = true; }
-  }
-  if (!settings.titleFont || !fs.existsSync(settings.titleFont)) {
-    const f = systemFont();
-    if (f) { settings.titleFont = f; changed = true; }
-  }
-  if (changed) saveSettings();
-  return settings;
-}
-function saveSettings() {
-  try { fs.writeFileSync(settingsPath(), JSON.stringify(settings, null, 2), 'utf8'); return true; }
-  catch (e) { return false; }
-}
-
-// ------------------------------------------------------------------ أدوات
-function killTree(p) {
-  if (!p || !p.pid) return;
-  try { p.kill(); } catch (e) {}
-  if (process.platform === 'win32') {
-    try { spawn('taskkill', ['/PID', String(p.pid), '/F', '/T'], { windowsHide: true, stdio: 'ignore' }); } catch (e) {}
-  }
-}
-
-// إرسال آمن للواجهة (حتى لو كانت النافذة مخفية أو مُخرَّبة)
 function safeSend(ch, payload) {
   try { if (win && !win.isDestroyed()) win.webContents.send(ch, payload); } catch (e) {}
 }
-
-function fmtElapsed() {
-  if (!liveStarted) return '';
-  const sec = Math.floor((Date.now() - liveStarted.getTime()) / 1000);
-  return [Math.floor(sec / 3600), Math.floor((sec % 3600) / 60), sec % 60]
-    .map(x => String(x).padStart(2, '0')).join(':');
+function log(msg, kind) {
+  const line = (kind ? '[' + kind + '] ' : '') + msg;
+  safeSend('log', line);
 }
 
-// مانع السكون: يمنع ويندوز من إسبات الجهاز أثناء البث
-function startPowerBlocker() {
-  try { if (psBlockerId === null) psBlockerId = powerSaveBlocker.start('prevent-app-suspension'); } catch (e) {}
+// ------------------------------------------------------------------ الإعدادات
+let settings = {
+  channelId: '',
+  channelTitle: '',
+  channelThumb: '',
+  title: 'LATCHI STREAM — بث مباشر',
+  description: '',
+  privacy: 'unlisted',
+  madeForKids: false,
+  categoryId: '',
+  thumbnail: '',
+  videoPath: '',
+  videoInfo: null,
+  copySafe: true,
+  preset: 'veryfast',
+  videoBitrate: '3000k',
+  audioBitrate: '128k',
+  threads: 0,
+  clientId: ''
+};
+
+function loadAll() {
+  try { if (fs.existsSync(settingsFile())) Object.assign(settings, JSON.parse(fs.readFileSync(settingsFile(), 'utf8'))); } catch (e) {}
+  // Client ID: من ملف منفصل (لا يُحزَّم)
+  try {
+    if (fs.existsSync(clientsFile())) {
+      const j = JSON.parse(fs.readFileSync(clientsFile(), 'utf8'));
+      if (j && j.clientId) settings.clientId = String(j.clientId);
+    }
+  } catch (e) {}
+  if (process.env.LATCHI_GOOGLE_CLIENT_ID) settings.clientId = process.env.LATCHI_GOOGLE_CLIENT_ID;
 }
-function stopPowerBlocker() {
-  try { if (psBlockerId !== null) { powerSaveBlocker.stop(psBlockerId); psBlockerId = null; } } catch (e) {}
+function saveSettings() {
+  try { fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2)); } catch (e) {}
 }
 
-function run(exe, args, timeoutMs) {
-  return new Promise((resolve) => {
-    let out = '', done = false;
+// ------------------------------------------------------------------ ffmpeg / ffprobe
+const IS_WIN = process.platform === 'win32';
+const FF_NAME = IS_WIN ? 'ffmpeg.exe' : 'ffmpeg';
+const FFP_NAME = IS_WIN ? 'ffprobe.exe' : 'ffprobe';
+
+function ffBinDir() {
+  const d = path.join(dataDir(), 'bin');
+  try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); } catch (e) {}
+  return d;
+}
+
+function findBin(name) {
+  const c = [path.join(ffBinDir(), name), path.join(dataDir(), name)];
+  if (process.resourcesPath) c.push(path.join(process.resourcesPath, 'ffmpeg', name));
+  c.push(path.join(__dirname, 'resources', 'ffmpeg', name));
+  const exeDir = path.dirname(app.getPath('exe'));
+  c.push(path.join(exeDir, name), path.join(exeDir, 'ffmpeg', name), path.join(exeDir, 'resources', 'ffmpeg', name));
+  if (IS_WIN) c.push('C:\\ffmpeg\\bin\\' + name);
+  for (const x of c) { try { if (fs.existsSync(x) && fs.statSync(x).size > 1000) return x; } catch (e) {} }
+  const P = process.env.PATH || process.env.Path || '';
+  for (const d of P.split(path.delimiter)) {
+    if (!d) continue;
+    const x = path.join(d, name);
+    try { if (fs.existsSync(x)) return x; } catch (e) {}
+  }
+  return null;
+}
+
+function works(binPath, args) {
+  return new Promise(resolve => {
+    if (!binPath) return resolve(false);
+    let done = false;
     let p;
-    try { p = spawn(exe, args, { windowsHide: true }); }
-    catch (e) { return resolve({ code: -1, out: String(e) }); }
-    const t = setTimeout(() => { if (!done) killTree(p); }, timeoutMs || 20000);
-    const acc = d => { if (out.length < 400000) out += d.toString(); };
-    p.stdout.on('data', acc);
-    p.stderr.on('data', acc);
-    p.on('close', c => { done = true; clearTimeout(t); resolve({ code: c, out }); });
-    p.on('error', e => { done = true; clearTimeout(t); resolve({ code: -1, out: String(e) }); });
+    try { p = spawn(binPath, args, { windowsHide: true }); } catch (e) { return resolve(false); }
+    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch (e) {} if (!done) { done = true; resolve(false); } }, 10000);
+    let out = '';
+    p.stdout.on('data', d => out += d.toString());
+    p.stderr.on('data', d => out += d.toString());
+    p.on('error', () => { if (!done) { done = true; clearTimeout(t); resolve(false); } });
+    p.on('close', () => { if (!done) { done = true; clearTimeout(t); resolve(/version/i.test(out)); } });
   });
 }
 
-function ffmpegRun(args, timeoutMs) {
-  if (!FFMPEG) return Promise.resolve({ code: -1, out: 'ffmpeg غير موجود' });
-  return run(FFMPEG, ['-hide_banner', '-nostdin'].concat(args), timeoutMs, tmpDir());
-}
-
-// ------------------------------------------------------------------ الأجهزة والمرمّزات
-async function listAudioDevices() {
-  const r = await ffmpegRun(['-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'], 25000);
-  const raw = [];
-  const re = /"([^"]+)"\s+\(audio\)/g;
-  let m;
-  while ((m = re.exec(r.out)) !== null) raw.push(m[1]);
-  const sel = core.selectSystemAudioDevices(raw);
-  blockedAudio = sel.blocked;
-  return sel;
-}
-
-async function listEncoders() {
-  const r = await ffmpegRun(['-encoders'], 20000);
-  const have = [];
-  for (const w of ['libx264', 'h264_qsv', 'h264_amf', 'h264_nvenc']) {
-    if (new RegExp('\\b' + w + '\\b').test(r.out)) have.push(w);
-  }
-  return have.length ? have : ['libx264'];
-}
-
-// ------------------------------------------------------------------ المعاينة (ذكية)
-// تُبثّ إطارات مخففة، وتُطبَّق عليها:
-//   - طبقة البانر (إن كان مفعّلاً)
-//   - العنوان النصي (كطبقة HTML في الواجهة، لا تُحرق في الصورة)
-// القص والزوم يُرسمان في الواجهة فوق الصورة (بلا حمل إضافي).
-// تُبنى في النواة حتى تبقى قابلة للاختبار
-function previewArgs(s) { return core.buildPreviewArgs(Object.assign({}, s, { _previewOut: previewFile() })); }
-
-function startPreview(s) {
-  stopPreview();
-  if (!FFMPEG) return { ok: false, error: 'ffmpeg.exe غير موجود بجانب التطبيق' };
-  // نسخة محلية: لا نكتب التراجع على القرص وإلا عاد المصدر إلى «كل الشاشة»
-  const use = Object.assign({}, s);
-  if (use.captureMode === 'window' && !String(use.windowTitle || '').trim()) {
-    use.captureMode = 'desktop';
-  }
-  const args = previewArgs(use);
-  try {
-    previewProc = spawnFfmpeg(args);
-    if (!previewProc) return { ok: false, error: 'ffmpeg غير قابل للتنفيذ — افتح لوحة الإصلاح' };
-  } catch (e) { return { ok: false, error: 'تعذّر تشغيل ffmpeg: ' + e.message }; }
-
-  let err = '';
-  previewProc.stderr.on('data', d => { if (err.length < 12000) err += d.toString(); });
-  previewProc.on('close', () => { previewProc = null; });
-  previewProc.on('error', () => { previewProc = null; });
-  return { ok: true, args };
-}
-
-function stopPreview() {
-  if (previewProc) { killTree(previewProc); previewProc = null; }
-  try { if (fs.existsSync(previewFile())) fs.unlinkSync(previewFile()); } catch (e) {}
-}
-
-function readPreviewFrame() {
-  try {
-    const f = previewFile();
-    if (!fs.existsSync(f)) return null;
-    const st = fs.statSync(f);
-    if (st.size < 800) return null;
-    const buf = fs.readFileSync(f);
-    if (!core.isJpeg(buf)) return null;
-    return 'data:image/jpeg;base64,' + buf.toString('base64');
-  } catch (e) { return null; }
-}
-
-// ------------------------------------------------------------------ اختبار المفتاح
-async function testKey(key) {
-  if (!FFMPEG) return { ok: false, error: 'ffmpeg.exe غير موجود' };
-  const shape = core.testKeyShape(core.cleanStreamKey(key || core.embeddedKey()));
-  if (!shape.ok) return { ok: false, error: shape.error };
-
-  const eps = core.youtubeEndpoints(shape.key);
-  const args = ['-loglevel', 'debug',
-    '-f', 'lavfi', '-i', 'color=c=black:s=160x120:r=5', '-t', '2',
-    '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-    '-b:v', '150k', '-threads', '1', '-pix_fmt', 'yuv420p',
-    '-an', '-f', 'flv', eps[0].url];
-
-  const r = await ffmpegRun(args, 30000);
-  const out = r.out;
-  if (/Connection refused|Connection reset|Network is unreachable|No route to host|Could not resolve/.test(out)) {
-    return { ok: false, error: 'تعذّر الوصول إلى خادم يوتيوب. تحقق من الإنترنت.' };
-  }
-  if (/Error opening output|Input\/output error|Failed to update header/i.test(out)) {
-    return { ok: false, error: 'يوتيوب رفض المفتاح. تأكد أنك نسخته كاملاً وأن البث ما زال مُنشأً في YouTube Studio.' };
-  }
-  if (/Successfully opened the file/.test(out)) {
-    return { ok: true, message: 'يوتيوب قبل المفتاح — البث جاهز للانطلاق', server: eps[0].name };
-  }
-  if (/Sending publish command/.test(out) && r.code === 0) {
-    return { ok: true, message: 'يوتيوب قبل المفتاح — البث جاهز للانطلاق', server: eps[0].name };
-  }
-  if (/Sending publish command/.test(out)) {
-    return { ok: false, error: 'يوتيوب رفض المفتاح.' };
-  }
-  const tail = out.split('\n').filter(x => x.trim()).slice(-4).join(' · ');
-  return { ok: false, error: ('لم يتأكد الاتصال: ' + tail).slice(0, 600) };
-}
-
-// ------------------------------------------------------------------ البث الحي
-// ★ نجاح الاتصال ≠ نجاح البث: يُقرأ معدل الإطارات الحقيقي بعد 12 ثانية ويُرفض البث الكاذب.
-// ★ عند الانقطاع المفاجئ يعاد الاتصال تلقائياً حتى restartMax مرات (إعداد autoRestart).
-const RESTART_DELAY = 3000;
-let liveArgs = null;        // آخر أمر بث ناجح — يُستعمل لإعادة الاتصال
-let restartCount = 0;       // عدّاد إعادة الاتصال للجلسة الحالية
-let restartTimer = null;
-let userStop = false;       // true = الإيقاف بطلب المستخدم (بلا إعادة اتصال)
-
-function restartMax() {
-  return Math.max(1, parseInt((settings && settings.restartMax) || 5, 10) || 5);
-}
-
-function spawnLive(args) {
-  let p;
-  try { p = spawnFfmpeg(args); if (!p) return res({ ok: false, error: 'ffmpeg غير قابل للتنفيذ' }); }
-  catch (e) { return null; }
-
-  p.on('close', (code) => {
-    if (liveProc !== p) return;           // عملية قديمة أو أُوقفت بطلب المستخدم
-    liveProc = null; liveStarted = null;
-    stopPowerBlocker();
-    updateTray();
-    if (userStop || quitting) return;
-    // انقطاع غير متوقع → إعادة اتصال تلقائية
-    if (settings && settings.autoRestart !== false && liveArgs && restartCount < restartMax()) {
-      restartCount++;
-      lastError = 'انقطع البث (كود ' + code + ') — إعادة اتصال ' + restartCount + '/' + restartMax();
-      safeSend('log', lastError);
-      safeSend('stream-restarting', { attempt: restartCount, max: restartMax(), error: lastError });
-      scheduleRestart();
-    } else {
-      lastError = 'توقف البث (كود ' + code + ')';
-      liveArgs = null;
-      safeSend('stream-ended', { code, error: lastError });
-    }
-  });
-  return p;
-}
-
-function scheduleRestart() {
-  if (restartTimer) clearTimeout(restartTimer);
-  restartTimer = setTimeout(() => {
-    restartTimer = null;
-    if (quitting || userStop || !liveArgs || !FFMPEG) return;
-    try { fs.writeFileSync(progressFile(), ''); } catch (e) {}
-    const p = spawnLive(liveArgs);
-    if (!p) return;
-    // إن صمد 6 ثوانٍ فقد عاد البث فعلاً
-    setTimeout(() => {
-      if (liveProc === p && p.exitCode === null && !userStop && !quitting) {
-        liveStarted = new Date();
-        startPowerBlocker();
-        updateTray();
-        safeSend('log', '✓ عاد البث للعمل بعد إعادة الاتصال رقم ' + restartCount);
-        safeSend('stream-restarted', { attempt: restartCount });
-      }
-    }, 6000);
-  }, RESTART_DELAY);
-}
-
-function runAttempt(s, which) {
-  return new Promise((res) => {
-    const b = core.buildLiveArgs(s, progressFile(), which);
-    if (!b.ok) return res({ ok: false, error: b.errors.join(' ') });
-
-    userStop = false; restartCount = 0;
-    let err = '';
-    let settled = false;
-    const settle = (v) => { if (!settled) { settled = true; res(v); } };
-
-    const p = spawnLive(b.args);
-    if (!p) return res({ ok: false, error: 'تعذّر تشغيل ffmpeg' });
-
-    p.stderr.on('data', d => { if (err.length < 60000) err += d.toString(); });
-    p.on('error', e => { clearTimeout(timer); settle({ ok: false, error: String(e && e.message || e) }); });
-    p.on('close', (code) => {
-      clearTimeout(timer);
-      if (!settled) {
-        const tail = err.split('\n').map(x => x.trim()).filter(Boolean).slice(-5).join(' · ');
-        settle({ ok: false, error: (tail || ('ffmpeg خرج بالكود ' + code)).slice(0, 900) });
-      }
-    });
-
-    // معيار النجاح المبدئي: صمد 3 ثوانٍ دون موت
-    const timer = setTimeout(() => {
-      if (p.exitCode === null) {
-        liveProc = p;
-        liveStarted = new Date();
-        liveServer = which;
-        liveArgs = b.args;
-        settle({ ok: true, pid: p.pid, server: which });
-      }
-    }, 3000);
-  });
-}
-
-function startLive(s) {
-  return new Promise(async (resolve) => {
-    if (!FFMPEG) return resolve({ ok: false, error: 'ffmpeg.exe غير موجود' });
-
-    const built = core.buildLiveArgs(s, progressFile(), 'primary');
-    if (!built.ok) return resolve({ ok: false, error: built.errors.join(' ') });
-
-    stopLive();
-    try { fs.writeFileSync(progressFile(), ''); } catch (e) {}
-
-    let r = await runAttempt(s, 'primary');
-    if (r.ok) {
-      r = await verifyThroughput(s);
-    }
-    if (!r.ok) {
-      if (liveProc) { killTree(liveProc); liveProc = null; }
-      safeSend('log', 'الخادم الرئيسي لم يستجب — تجريب الاحتياطي…');
-      const r2 = await runAttempt(s, 'backup');
-      if (r2.ok) {
-        const v = await verifyThroughput(s);
-        if (v.ok) { startPowerBlocker(); updateTray(); return resolve(v); }
-        stopLive();
-        return resolve(v);
-      }
-      return resolve({ ok: false, error: 'فشل البث على الخادمين:\n' + r.error });
-    }
-    startPowerBlocker();
-    updateTray();
-    resolve(r);
-  });
-}
-
-// ★ مهم: نجاح الاتصال ≠ نجاح البث.
-// إن كان الجهاز عاجزاً عن الترميز يرسل ffmpeg إطاراً كل عدة ثوانٍ
-// (شاهدنا 0.1 إطار/ث) فيقبل يوتيوب الاتصال لكن لا يظهر بث إطلاقاً.
-// نتحقق من معدل الإطارات الحقيقي بعد 12 ثانية ونرفض البث الكاذب.
-function verifyThroughput(s) {
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      const want = parseInt(s.fps, 10) || 30;
-      const got = readProgress().fps;
-      const floor = Math.max(3, want * 0.25);   // 25% من الهدف = بث مقبول
-      if (got >= floor) return resolve({ ok: true, fps: got, verified: true });
-      stopLive();
-      lastError = 'معدل إطارات منخفض: ' + got.toFixed(1);
-      safeSend('stream-ended', { code: -2, error: lastError });
-      resolve({
-        ok: false,
-        error: 'الجهاز عاجز عن الترميز بهذه الجودة: ' + got.toFixed(1) +
-               ' إطار/ث بدل ' + want + '. يوتيوب قبل الاتصال لكن لن يظهر بث.\n' +
-               'الحل: اختر وضع «موفّر» (854×480 @15) أو «متوازن» (720p) وقلّل القص.'
-      });
-    }, 12000);
-  });
-}
-
-function stopLive() {
-  userStop = true;
-  if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
-  if (liveProc) { killTree(liveProc); liveProc = null; }
-  liveStarted = null; liveArgs = null; liveServer = '';
-  stopPowerBlocker();
-  try { fs.writeFileSync(progressFile(), ''); } catch (e) {}
-  updateTray();
-}
-
-function readProgress() {
-  const r = { fps: 0, dropped: 0, bitrate: '' };
-  try {
-    const txt = fs.readFileSync(progressFile(), 'utf8');
-    const a = [...txt.matchAll(/fps=([\d.]+)/g)];
-    const b = [...txt.matchAll(/drop_frames=(\d+)/g)];
-    const c = [...txt.matchAll(/bitrate=\s*([\d.]+\w+)/g)];
-    if (a.length) r.fps = parseFloat(a[a.length - 1][1]) || 0;
-    if (b.length) r.dropped = parseInt(b[b.length - 1][1], 10) || 0;
-    if (c.length) r.bitrate = c[c.length - 1][1];
-  } catch (e) {}
-  return r;
-}
-
-// مستطيل نافذة بالعنوان — يُستخدم لقصّ النافذة من الشاشة الكاملة (وضع اللعبة)
-async function windowRect(title) {
-  if (!title) return { ok: false, error: 'لا عنوان' };
-  const safe = title.replace(/'/g, "''");
-  const ps = `
-$target = '${safe}'
-$src = @"
-using System;
-using System.Text;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
-public class WR {
-  delegate bool E(IntPtr h, IntPtr l);
-  [DllImport("user32.dll")] static extern bool EnumWindows(E cb, IntPtr p);
-  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
-  [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
-  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint c);
-  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
-  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
-  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
-  static string T; static IntPtr Found = IntPtr.Zero;
-  static bool C(IntPtr h, IntPtr l) {
-    try {
-      if (!IsWindowVisible(h)) return true;
-      if (GetWindow(h, 4) != IntPtr.Zero) return true;
-      int n = GetWindowTextLength(h); if (n <= 0) return true;
-      var sb = new StringBuilder(n + 2); GetWindowTextW(h, sb, sb.Capacity);
-      if (sb.ToString().Trim() == T) { Found = h; return false; }
-    } catch {}
-    return true;
-  }
-  public static string Find(string t) {
-    T = t.Trim(); Found = IntPtr.Zero;
-    EnumWindows(new E(C), IntPtr.Zero);
-    if (Found == IntPtr.Zero) return "NOTFOUND";
-    POINT p = new POINT(); p.X = 0; p.Y = 0;
-    ClientToScreen(Found, ref p);
-    RECT cr; GetClientRect(Found, out cr);
-    int w = cr.Right - cr.Left, hh = cr.Bottom - cr.Top;
-    if (w <= 0 || hh <= 0) { RECT wr; GetWindowRect(Found, out wr); p.X = wr.Left; p.Y = wr.Top; w = wr.Right - wr.Left; hh = wr.Bottom - wr.Top; }
-    return p.X + "," + p.Y + "," + w + "," + hh;
-  }
-}
-"@
-Add-Type -TypeDefinition $src -ErrorAction Stop
-[WR]::Find($target)
-`;
-  const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps], 25000);
-  const out = (r.out || '').trim().split(/\r?\n/).pop().trim();
-  if (!out || out === 'NOTFOUND') {
-    return { ok: false, error: 'لم أجد نافذة عنوانها: ' + title + ' — حدّث القائمة واختر من جديد' };
-  }
-  const [x, y, w, h] = out.split(',').map(n => parseInt(n, 10));
-  if ([x, y, w, h].some(v => isNaN(v)) || w < 16 || h < 16) {
-    return { ok: false, error: 'مستطيل النافذة غير صالح: ' + out };
-  }
-  return { ok: true, x, y, w, h };
-}
-
-// ------------------------------------------------------------------ أيقونة الخلفية (Tray)
-function trayIconPath() {
-  const cands = [path.join(__dirname, 'assets', 'icon', 'icon.ico'),
-                 path.join(__dirname, 'build', 'icon.ico')];
-  for (const c of cands) { try { if (fs.existsSync(c)) return c; } catch (e) {} }
-  return '';
-}
-
-function showMainWindow() {
-  try {
-    if (!win || win.isDestroyed()) { createWindow(); return; }
-    if (win.isMinimized()) win.restore();
-    win.show(); win.focus();
-  } catch (e) {}
-}
-
-function balloon(title, content) {
-  if (process.platform !== 'win32' || !tray) return;
-  try { tray.displayBalloon({ title, content }); } catch (e) {}
-}
-
-function updateTray() {
-  if (!tray) return;
-  try {
-    const live = !!liveProc;
-    tray.setToolTip(live ? 'LATCHI STREAM — البث يعمل على يوتيوب' + (liveStarted ? ' · ' + fmtElapsed() : '')
-                         : 'LATCHI STREAM — جاهز في الخلفية');
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: live ? '● البث يعمل على يوتيوب' + (liveStarted ? ' · ' + fmtElapsed() : '')
-                    : 'البث متوقف', enabled: false },
-      { type: 'separator' },
-      { label: 'إظهار التطبيق', click: showMainWindow },
-      { label: 'إيقاف البث', enabled: live,
-        click: () => { stopLive(); safeSend('log', 'أُوقف البث من أيقونة الخلفية'); } },
-      { label: 'بدء البث (الإعدادات المحفوظة)', enabled: !live && !!(settings && settings.youtubeKey),
-        click: () => {
-          const s = Object.assign({}, settings);
-          startLive(s).then(r => {
-            if (r.ok) { stopPreview(); balloon('LATCHI STREAM', 'انطلق البث على يوتيوب ✓'); }
-            else safeSend('log', 'فشل بدء البث: ' + r.error);
-          });
-        } },
-      { type: 'separator' },
-      { label: 'خروج نهائي (يوقف البث)', click: () => { quitting = true; app.quit(); } }
-    ]));
-  } catch (e) {}
-}
-
-function createTray() {
-  try {
-    const p = trayIconPath();
-    if (!p) { tray = null; return; }
-    tray = new Tray(p);
-  } catch (e) { tray = null; return; }
-  updateTray();
+async function resolveTools() {
+  const f = findBin(FF_NAME), p = findBin(FFP_NAME);
+  // تحقق فعلي (لا تخمين): الملف الموجود ليس بالضرورة قابلاً للتنفيذ
+  const okF = await works(f, ['-hide_banner', '-version']);
+  const okP = await works(p, ['-hide_banner', '-version']);
+  FFMPEG = okF ? f : null;
+  FFPROBE = okP ? p : null;
+  return { ffmpeg: !!FFMPEG, ffprobe: !!FFPROBE, ffmpegPath: FFMPEG || '', ffprobePath: FFPROBE || '' };
 }
 
 // ------------------------------------------------------------------ النافذة
 function createWindow() {
   win = new BrowserWindow({
-    width: 1500, height: 950, minWidth: 1200, minHeight: 780,
-    backgroundColor: '#070b12', show: false, autoHideMenuBar: true,
-    title: 'LATCHI STREAM ' + APP_VERSION,
-    icon: (() => {
-      const a = path.join(__dirname, 'assets', 'icon', 'icon.ico');
-      const b = path.join(__dirname, 'build', 'icon.ico');
-      try { if (fs.existsSync(a)) return a; } catch (e) {}
-      return b;
-    })(),
+    width: 1080, height: 780, minWidth: 900, minHeight: 640,
+    backgroundColor: '#0f1520',
+    show: false,
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      webviewTag: true,
       spellcheck: false
     }
   });
-
-  win.setMenuBarVisibility(false);
   win.loadFile(path.join(__dirname, 'ui', 'index.html'));
-  win.once('ready-to-show', () => { win.show(); win.focus(); });
-
-  // ★ الإغلاق (X) لا يخرج من التطبيق: النافذة تُخفى والبث يستمر في الخلفية.
-  //   الخروج النهائي فقط من أيقونة الساعة أو زر «خروج نهائي».
-  win.on('close', (e) => {
-    if (quitting) return;
-    if (settings && settings.closeToTray === false) { quitting = true; app.quit(); return; }
-    e.preventDefault();
-    try { win.hide(); } catch (err) {}
-    balloon('LATCHI STREAM — في الخلفية',
-            liveProc ? 'البث مستمر على يوتيوب ✓ افتح التطبيق من أيقونة الساعة بجانب الوقت.'
-                     : 'التطبيق يعمل في الخلفية. الخروج النهائي من أيقونة الساعة.');
-  });
-
+  win.once('ready-to-show', () => win.show());
   win.on('closed', () => { win = null; });
-
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (/^https?:/i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
-  win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://')) { e.preventDefault(); shell.openExternal(url); }
-  });
 }
+
+// ------------------------------------------------------------------ حالة للواجهة
+function stateForUi() {
+  return {
+    version: APP_VERSION,
+    phase: live.phase,
+    error: live.error,
+    tools: { ffmpeg: !!FFMPEG, ffprobe: !!FFPROBE },
+    auth: auth ? auth.profile() : { connected: false },
+    clientConfigured: !!(auth && auth.configured()),
+    settings: {
+      title: settings.title, description: settings.description, privacy: settings.privacy,
+      madeForKids: settings.madeForKids, categoryId: settings.categoryId, thumbnail: settings.thumbnail,
+      videoPath: settings.videoPath, preset: settings.preset, videoBitrate: settings.videoBitrate,
+      audioBitrate: settings.audioBitrate, threads: settings.threads
+    },
+    channel: live.channel || (settings.channelId ? { id: settings.channelId, title: settings.channelTitle, thumbnail: settings.channelThumb } : null),
+    video: live.video,
+    broadcast: live.broadcast,
+    progress: live.progress,
+    elapsed: live.startedAt ? Math.round((Date.now() - live.startedAt) / 1000) : 0,
+    duration: (live.video && live.video.duration) || 0,
+    copySafe: !!(live.video && live.video.copySafe)
+  };
+}
+function pushState() { safeSend('state', stateForUi()); }
+
+// ------------------------------------------------------------------ اختيار الفيديو
+async function pickVideo() {
+  const r = await dialog.showOpenDialog(win, {
+    title: 'اختر ملف فيديو لبثه على YouTube',
+    properties: ['openFile'],
+    filters: [
+      { name: 'ملفات فيديو مدعومة', extensions: ['mp4', 'mkv', 'mov', 'avi', 'flv', 'webm', 'ts', 'm4v', 'mpg', 'mpeg', 'wmv'] },
+      { name: 'كل الملفات', extensions: ['*'] }
+    ]
+  });
+  if (r.canceled || !r.filePaths || !r.filePaths[0]) return { ok: false, canceled: true };
+  return analyzeVideo(r.filePaths[0]);
+}
+
+async function analyzeVideo(file) {
+  if (!engine) engine = new VideoStream.StreamEngine({ ffmpegPath: FFMPEG, ffprobePath: FFPROBE, log });
+  if (!FFPROBE) return { ok: false, error: 'ffprobe غير متاح — لا يمكن فحص الفيديو' };
+  if (!fs.existsSync(file)) return { ok: false, error: 'الملف غير موجود' };
+
+  const info = await engine.probe(file);
+  if (!info.ok) return info;
+
+  info.file = file;
+  info.fileName = path.basename(file);
+  info.sizeMB = Math.round((info.size || 0) / 1048576 * 10) / 10;
+  info.copySafe = VideoStream.isYouTubeCopySafe(info);
+  info.strategy = info.copySafe ? 'نسخ مباشر (بلا ترميز)' : 'ترميز خفيف H.264/AAC';
+  info.durationHMS = hms(info.duration);
+
+  live.video = info;
+  settings.videoPath = file;
+  settings.videoInfo = {
+    duration: info.duration, width: info.video.width, height: info.video.height,
+    codec: info.video.codec, copySafe: info.copySafe
+  };
+  saveSettings();
+  pushState();
+  log('تم فحص الفيديو: ' + info.fileName + ' — ' + info.strategy + (info.hasAudio ? '' : ' (بلا صوت ⇒ صمت مولّد)'), 'ok');
+  return { ok: true, video: info };
+}
+
+function hms(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), q = s % 60;
+  return (h ? h + ':' : '') + String(m).padStart(2, '0') + ':' + String(q).padStart(2, '0');
+}
+
+// ------------------------------------------------------------------ بدء البث
+async function startLive(input) {
+  if (live.phase === 'live' || live.phase === 'connecting' || live.phase === 'preparing') {
+    return { ok: false, error: 'هناك بث جارٍ بالفعل' };
+  }
+  live.error = '';
+  live.autoStopped = false;
+
+  if (!auth || !auth.connected()) return fail('اربط حساب Google أولاً');
+  if (!FFMPEG || !FFPROBE) return fail('ffmpeg/ffprobe غير متاحين');
+  if (!live.channel && !settings.channelId) return fail('اختر قناة YouTube أولاً');
+  if (!settings.videoPath || !fs.existsSync(settings.videoPath)) return fail('اختر ملف فيديو أولاً');
+
+  const opt = Object.assign({
+    title: settings.title, description: settings.description, privacy: settings.privacy,
+    madeForKids: settings.madeForKids, categoryId: settings.categoryId, thumbnail: settings.thumbnail
+  }, input || {});
+
+  settings.title = String(opt.title || settings.title).slice(0, 100);
+  settings.description = String(opt.description || '');
+  settings.privacy = ['public', 'unlisted', 'private'].includes(opt.privacy) ? opt.privacy : 'unlisted';
+  settings.madeForKids = !!opt.madeForKids;
+  settings.categoryId = opt.categoryId || settings.categoryId;
+  saveSettings();
+
+  try {
+    // 1) فحص الفيديو (محدث)
+    live.phase = 'preparing'; pushState();
+    const info = (live.video && live.video.file === settings.videoPath) ? live.video : await analyzeVideo(settings.videoPath);
+    if (!info || !info.ok) return fail((info && info.error) || 'تعذّر فحص الفيديو');
+
+    // 2) تيار RTMP
+    log('جارٍ تجهيز تيار البث على YouTube…');
+    const st = await yt.ensureLiveStream('LATCHI STREAM');
+    if (!st.ok) return fail(st.error || 'تعذّر إنشاء تيار RTMP');
+    live.stream = st.stream;
+    log('تيار RTMP جاهز: ' + st.stream.ingestionAddress + (st.reused ? ' (مُعاد استعماله)' : ' (جديد)'), 'ok');
+
+    // 3) البث
+    const br = await yt.createBroadcast({
+      title: settings.title, description: settings.description, privacy: settings.privacy,
+      madeForKids: settings.madeForKids, categoryId: settings.categoryId
+    });
+    if (!br.ok) return fail(br.error || 'تعذّر إنشاء البث');
+    live.broadcast = br.broadcast;
+    log('أُنشئ البث: ' + br.broadcast.watchUrl, 'ok');
+
+    // 4) ربط
+    const bind = await yt.bindBroadcast(br.broadcast.id, st.stream.id);
+    if (!bind.ok) return fail(bind.error || 'تعذّر ربط البث بالتيار');
+    log('تم ربط البث بالتيار (bind)', 'ok');
+
+    // 5) صورة مصغّرة (اختياري، لا يُفشل البث)
+    if (settings.thumbnail && fs.existsSync(settings.thumbnail)) {
+      const th = await yt.setThumbnail(br.broadcast.id, settings.thumbnail);
+      if (th.ok) log('تم رفع الصورة المصغّرة', 'ok');
+      else log('تعذّر رفع الصورة المصغّرة: ' + th.error, 'warn');
+    }
+
+    // 6) تشغيل ffmpeg
+    const rtmp = yt.rtmpUrl(st.stream, false);
+    const pf = progressFile();
+    try { fs.writeFileSync(pf, ''); } catch (e) {}
+
+    engine = new VideoStream.StreamEngine({ ffmpegPath: FFMPEG, ffprobePath: FFPROBE, onEnd: onStreamEnd, log });
+    const startRes = engine.start(info, {
+      file: settings.videoPath,
+      rtmpUrl: rtmp,
+      copySafe: info.copySafe,
+      progressPath: pf,
+      threads: settings.threads,
+      preset: settings.preset,
+      videoBitrate: settings.videoBitrate,
+      audioBitrate: settings.audioBitrate,
+      cwd: tmpDir()
+    });
+    if (!startRes.ok) return fail(startRes.error);
+
+    live.phase = 'connecting';
+    live.startedAt = Date.now();
+    live.endedAt = 0;
+    live.progress = { frame: 0, fps: 0, bitrate: '', outTimeMs: 0, speed: '', dropFrames: 0 };
+    startProgressTimer();
+    startHealthTimer();
+    pushState();
+    log('بدأ إرسال الفيديو إلى YouTube…', 'ok');
+    return { ok: true, broadcast: live.broadcast, stream: { id: live.stream.id } };
+  } catch (e) {
+    return fail('خطأ غير متوقع: ' + (e && e.message));
+  }
+}
+
+function fail(msg) {
+  live.phase = 'error';
+  live.error = String(msg || 'خطأ');
+  stopTimers();
+  log('فشل: ' + live.error, 'err');
+  pushState();
+  return { ok: false, error: live.error };
+}
+
+// ------------------------------------------------------------------ مراقبة التقدم
+let progressTimer = null;
+let healthTimer = null;
+
+function startProgressTimer() {
+  stopProgressTimer();
+  progressTimer = setInterval(() => {
+    try {
+      const txt = fs.readFileSync(progressFile(), 'utf8');
+      const p = VideoStream.parseProgress(txt);
+      if (p.frame || p.outTimeMs) {
+        live.progress = p;
+        const dur = (live.video && live.video.duration) || 0;
+        const outSec = p.outTimeMs / 1000000;
+        // ★ إيقاف تلقائي عند نهاية الملف الفعلية (بهوامش أمان)
+        if (dur > 0 && outSec >= dur - 0.4 && live.phase !== 'stopping') {
+          log('انتهى الفيديو — إيقاف تلقائي للبث', 'ok');
+          stopLive({ auto: true });
+          return;
+        }
+        pushState();
+      }
+    } catch (e) {}
+  }, 1000);
+}
+function stopProgressTimer() { if (progressTimer) { clearInterval(progressTimer); progressTimer = null; } }
+
+// راقب حالة البث على YouTube: connecting → ready → live
+function startHealthTimer() {
+  stopHealthTimer();
+  healthTimer = setInterval(async () => {
+    if (!live.broadcast || !yt) return;
+    try {
+      const s = await yt.broadcastStatus(live.broadcast.id);
+      if (!s.ok) return;
+      const lc = s.lifeCycleStatus;
+      if (lc === 'ready' && live.phase === 'connecting') {
+        live.phase = 'ready';
+        log('YouTube جاهز للبث (ready) — أكمل إلى live…', 'ok');
+        pushState();
+        // ننتظر ثانيتين ثم ننتقل إلى live
+        setTimeout(async () => {
+          if (live.phase !== 'ready') return;
+          const t = await yt.transition(live.broadcast.id, 'live');
+          if (t.ok) { live.phase = 'live'; log('البث صار LIVE على يوتيوب ✓', 'ok'); }
+          else log('تعذّر الانتقال إلى live: ' + t.error, 'warn');
+          pushState();
+        }, 2000);
+      } else if (lc === 'live' && live.phase !== 'live') {
+        live.phase = 'live';
+        log('البث صار LIVE على يوتيوب ✓', 'ok');
+        pushState();
+      } else if (lc === 'complete') {
+        if (live.phase !== 'done') { live.phase = 'done'; pushState(); }
+      }
+      live.lastHealthPolls++;
+    } catch (e) {}
+  }, 3000);
+}
+function stopHealthTimer() { if (healthTimer) { clearInterval(healthTimer); healthTimer = null; } }
+function stopTimers() { stopProgressTimer(); stopHealthTimer(); }
+
+// ------------------------------------------------------------------ إيقاف البث
+async function stopLive(opts) {
+  const o = opts || {};
+  if (live.phase === 'stopping' || live.phase === 'done') return { ok: true };
+  const hadBroadcast = !!live.broadcast;
+  live.phase = 'stopping';
+  pushState();
+  log(o.auto ? 'إيقاف تلقائي بعد نهاية الفيديو…' : 'إيقاف البث بناءً على طلبك…');
+
+  // 1) أوقف ffmpeg بلطف
+  if (engine && engine.running) {
+    engine.stop(true);
+    const t0 = Date.now();
+    while (engine.running && Date.now() - t0 < 6000) await sleep(150);
+    if (engine.running) { try { engine.stop(false); } catch (e) {} }
+  }
+  stopProgressTimer();
+
+  // 2) أنهِ البث على YouTube عبر API — لا نترك بثاً عالقاً
+  if (hadBroadcast && yt) {
+    try {
+      const st = await yt.broadcastStatus(live.broadcast.id);
+      const lc = (st.ok && st.lifeCycleStatus) || '';
+      if (lc !== 'complete') {
+        const t = await yt.transition(live.broadcast.id, 'complete');
+        if (t.ok) log('أُنهي البث على YouTube (complete) ✓', 'ok');
+        else log('تعذّر إنهاء البث عبر API: ' + t.error, 'warn');
+      }
+    } catch (e) {}
+  }
+  stopHealthTimer();
+  live.phase = 'done';
+  live.endedAt = Date.now();
+  live.autoStopped = !!o.auto;
+  pushState();
+  return { ok: true };
+}
+
+function onStreamEnd(info) {
+  // ffmpeg خرج — إن كان طبيعياً ولا يوجد إيقاف جارٍ، أنهِ البث على YouTube
+  if (!info) return;
+  if (info.natural) {
+    log('انتهى إرسال الفيديو (ffmpeg خرج بسلام)', 'ok');
+    setTimeout(() => { if (live.phase !== 'done') stopLive({ auto: true }); }, 1200);
+  } else if (!info.ok) {
+    log('توقّف ffmpeg: ' + (info.error || ''), 'err');
+    if (live.phase !== 'stopping' && live.phase !== 'done') {
+      live.error = info.error || 'انقطع البث';
+      setTimeout(() => { if (live.phase !== 'done') stopLive({ auto: true }); }, 800);
+    }
+  }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ------------------------------------------------------------------ IPC
 function ipc() {
-  ipcMain.handle('app:info', async () => ({
-    version: APP_VERSION,
-    ffmpeg: FFMPEG, ffmpegOk: !!FFMPEG,
-    platform: process.platform,
-    userData: cfgDir(),
-    bannerPath: settings ? settings.bannerPath : bundledBanner(),
-    bundledBanner: bundledBanner(),
-    fontPath: settings ? settings.titleFont : systemFont(),
-    portable: !!process.env.PORTABLE_EXECUTABLE_DIR
-  }));
+  ipcMain.handle('app:state', async () => stateForUi());
 
-  ipcMain.handle('settings:get', async () => settings);
-  ipcMain.handle('settings:set', async (e, patch) => {
-    if (patch && typeof patch === 'object') Object.assign(settings, patch);
-    settings.audioMode = 'system';
-    saveSettings();
-    return { ok: true, settings };
-  });
-  // لا تسمح لكائن قديم من الواجهة بمحو مسار بانر أو خط محفوظين
-  function mergeRuntime(s) {
-    const p = Object.assign({}, s || {});
-    if (!p.bannerPath && settings.bannerPath) p.bannerPath = settings.bannerPath;
-    if (!p.titleFont && settings.titleFont) p.titleFont = settings.titleFont;
-    if (!p.youtubeKey && settings.youtubeKey) p.youtubeKey = settings.youtubeKey;
-    Object.assign(settings, p);
-    settings.audioMode = 'system';
-    saveSettings();
-    return settings;
-  }
-
-  ipcMain.handle('audio:list', async () => {
-    const sel = await listAudioDevices();
-    return { ok: true, devices: sel.devices, blocked: blockedAudio };
-  });
-  ipcMain.handle('encoders:list', async () => ({ ok: true, encoders: await listEncoders() }));
-
-  ipcMain.handle('key:embedded', async () => {
-    const k = core.embeddedKey();
-    return { ok: !!k, hasKey: !!k, masked: k ? (k.slice(0, 4) + '-••••-••••-' + k.slice(-3)) : '••••' };
-  });
-  ipcMain.handle('key:test', async (e, k) => testKey(k));
-
-  // ---- المعاينة
-  ipcMain.handle('preview:start', async (e, s) => {
-    return startPreview(mergeRuntime(s));
-  });
-  ipcMain.handle('preview:stop', async () => { stopPreview(); return { ok: true }; });
-  ipcMain.handle('preview:frame', async () => ({ on: !!previewProc, frame: readPreviewFrame() }));
-
-  // ---- البث
-  ipcMain.handle('stream:start', async (e, s) => {
-    const cfg = mergeRuntime(s);
-    if (cfg.captureMode === 'game' && process.platform === 'win32') {
-      const rc = await windowRect(cfg.windowTitle || '');
-      if (!rc.ok) return { ok: false, error: rc.error };
-      cfg.cropX = rc.x; cfg.cropY = rc.y; cfg.cropW = rc.w; cfg.cropH = rc.h;
-      cfg.screenW = Math.max(cfg.screenW || 0, rc.x + rc.w);
-      cfg.screenH = Math.max(cfg.screenH || 0, rc.y + rc.h);
-      Object.assign(settings, { cropX: rc.x, cropY: rc.y, cropW: rc.w, cropH: rc.h,
-                                screenW: cfg.screenW, screenH: cfg.screenH });
-      saveSettings();
-      safeSend('log', 'وضع اللعبة: نافذة عند (' + rc.x + ',' + rc.y + ') بحجم ' + rc.w + '×' + rc.h);
-    }
-    const r = await startLive(cfg);
-    if (r.ok) stopPreview();     // تحرير المعالج للبث
+  // ---- OAuth ----
+  ipcMain.handle('auth:connect', async () => {
+    if (!auth.configured()) return { ok: false, error: 'أضف Google OAuth Client ID أولاً (زر الإعدادات)' };
+    const r = await auth.connect();
+    if (r.ok) { log('تم ربط حساب Google: ' + (r.profile.email || ''), 'ok'); pushState(); }
+    else log('فشل الربط: ' + r.error, 'err');
     return r;
   });
-  ipcMain.handle('stream:stop', async () => { stopLive(); return { ok: true }; });
-
-  ipcMain.handle('state:get', async () => {
-    const pr = readProgress();
-    let elapsed = '—';
-    if (liveStarted) {
-      const sec = Math.floor((Date.now() - liveStarted.getTime()) / 1000);
-      elapsed = [Math.floor(sec / 3600), Math.floor((sec % 3600) / 60), sec % 60]
-        .map(x => String(x).padStart(2, '0')).join(':');
-    }
-    return {
-      streaming: !!liveProc, previewOn: !!previewProc,
-      restarting: !!restartTimer, restartCount,
-      fps: pr.fps, dropped: pr.dropped, bitrate: pr.bitrate,
-      elapsed, lastError, server: liveServer, ffmpeg: !!FFMPEG
-    };
-  });
-
-  // ---- النوافذ
-  ipcMain.handle('window:list', async () => {
-    if (process.platform !== 'win32') return { ok: true, windows: [] };
-    const ps = `
-$src = @"
-using System;
-using System.Text;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
-public class LW {
-  delegate bool E(IntPtr h, IntPtr l);
-  [DllImport("user32.dll")] static extern bool EnumWindows(E cb, IntPtr p);
-  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
-  [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
-  [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint c);
-  [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr h, int i);
-  static List<string> R = new List<string>();
-  static bool C(IntPtr h, IntPtr l) {
-    try {
-      if (!IsWindowVisible(h)) return true;
-      if (GetWindow(h, 4) != IntPtr.Zero) return true;
-      int n = GetWindowTextLength(h);
-      if (n <= 0) return true;
-      var sb = new StringBuilder(n + 2);
-      GetWindowTextW(h, sb, sb.Capacity);
-      string t = sb.ToString().Trim();
-      if (t.Length > 0 && !R.Contains(t)) R.Add(t);
-    } catch {}
-    return true;
-  }
-  public static string[] Titles() { R = new List<string>(); EnumWindows(new E(C), IntPtr.Zero); return R.ToArray(); }
-}
-"@
-Add-Type -TypeDefinition $src -ErrorAction Stop
-[LW]::Titles() | ConvertTo-Json -Compress
-`;
-    const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps], 25000);
-    let list = [];
-    try { list = JSON.parse((r.out || '').trim() || '[]'); } catch (e) { list = []; }
-    if (!Array.isArray(list)) list = [list];
-    return { ok: true, windows: list.filter(x => typeof x === 'string' && x.trim()) };
-  });
-
-  // مستطيل النافذة على الشاشة (لوضع اللعبة/النافذة القصّية)
-  ipcMain.handle('window:rect', async (e, title) => {
-    if (process.platform !== 'win32') return { ok: false, error: 'غير مدعوم على هذه المنصة' };
-    const r = await windowRect(String(title || ''));
-    return r;
-  });
-
-  // نافذة نشطة بعد إخفاء التطبيق (اختيار بالماوس)
-  ipcMain.handle('window:pickByMouse', async () => {
-    if (process.platform !== 'win32') return { ok: false, error: 'غير مدعوم على هذه المنصة' };
-    const wasVisible = win && win.isVisible();
-    if (win) win.hide();
-    await new Promise(r => setTimeout(r, 2600));
-    const ps = `
-Add-Type -AssemblyName System.Windows.Forms
-$p = [System.Windows.Forms.Cursor]::Position
-Add-Type @"
-using System;
-using System.Text;
-using System.Runtime.InteropServices;
-public class WP {
-  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
-  [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint f);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
-  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);
-  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
-  public static string Title(int x, int y) {
-    var pt = new POINT(); pt.X = x; pt.Y = y;
-    IntPtr h = WindowFromPoint(pt);
-    if (h == IntPtr.Zero) return "";
-    IntPtr root = GetAncestor(h, 2);
-    if (root != IntPtr.Zero) h = root;
-    int n = GetWindowTextLength(h);
-    if (n <= 0) return "";
-    var sb = new StringBuilder(n + 2);
-    GetWindowTextW(h, sb, sb.Capacity);
-    return sb.ToString().Trim();
-  }
-}
-"@
-[WP]::Title($p.X, $p.Y)
-`;
-    const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps], 20000);
-    if (wasVisible && win) { win.show(); win.focus(); }
-    const title = (r.out || '').trim().split(/\r?\n/).pop().trim();
-    if (!title) return { ok: false, error: 'لم يُعثر على نافذة تحت المؤشر' };
-    return { ok: true, title };
-  });
-
-  // ---- اختيار ملفات
-  ipcMain.handle('dialog:image', async () => {
-    const r = await dialog.showOpenDialog(win, {
-      title: 'اختر صورة البانر',
-      filters: [{ name: 'صور', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }],
-      properties: ['openFile']
-    });
-    if (r.canceled || !r.filePaths.length) return { ok: false };
-    const dest = path.join(cfgDir(), 'banner-custom.png');
-    try {
-      fs.copyFileSync(r.filePaths[0], dest);
-      // حوّل إلى PNG دائماً لتفادي مشاكل المسارات
-      try {
-        const im = nativeImage.createFromPath(dest);
-        if (!im.isEmpty()) fs.writeFileSync(dest, im.toPNG());
-      } catch (e) {}
-      return { ok: true, path: dest };
-    } catch (e) { return { ok: false, error: e.message }; }
-  });
-
-  ipcMain.handle('dialog:font', async () => {
-    const r = await dialog.showOpenDialog(win, {
-      title: 'اختر ملف خط',
-      filters: [{ name: 'خطوط', extensions: ['ttf', 'otf', 'ttc'] }],
-      properties: ['openFile']
-    });
-    if (r.canceled || !r.filePaths.length) return { ok: false };
-    const dest = path.join(cfgDir(), 'font' + path.extname(r.filePaths[0]));
-    try { fs.copyFileSync(r.filePaths[0], dest); return { ok: true, path: dest }; }
-    catch (e) { return { ok: false, error: e.message }; }
-  });
-
-  // خط النظام الافتراضي للعناوين
-  ipcMain.handle('font:default', async () => {
-    const f = systemFont();
-    return f ? { ok: true, path: f } : { ok: false };
-  });
-
-  ipcMain.handle('shell:open', async (e, url) => {
-    try { await shell.openExternal(String(url)); return { ok: true }; } catch (x) { return { ok: false }; }
-  });
-
-  ipcMain.handle('fullscreen:get', async () => ({ full: win ? win.isFullScreen() : false }));
-  ipcMain.handle('fullscreen:set', async (e, on) => { if (win) win.setFullScreen(!!on); return { ok: true }; });
-
-  // إخفاء النافذة إلى الخلفية (البث يستمر) + خروج نهائي حقيقي
-  ipcMain.handle('window:hide', async () => {
-    try { if (win && !win.isDestroyed()) win.hide(); } catch (e) {}
-    balloon('LATCHI STREAM — في الخلفية',
-            liveProc ? 'البث مستمر على يوتيوب ✓' : 'التطبيق يعمل في الخلفية');
+  ipcMain.handle('auth:disconnect', async () => {
+    await auth.disconnect();
+    live.channel = null;
+    settings.channelId = ''; settings.channelTitle = ''; settings.channelThumb = '';
+    saveSettings();
+    pushState();
     return { ok: true };
   });
-  // ---------------------------------------------------------------- ffmpeg (لوحة الإصلاح)
-  ipcMain.handle('ffmpeg:status', async () => ffmpegStatus());
+  ipcMain.handle('auth:setClientId', async (e, id) => {
+    const clean = String(id || '').trim();
+    if (!/^[0-9A-Za-z._-]{20,}\.apps\.googleusercontent\.com$/.test(clean)) {
+      return { ok: false, error: 'معرّف العميل غير صالح — يجب أن ينتهي بـ .apps.googleusercontent.com' };
+    }
+    settings.clientId = clean;
+    try { fs.writeFileSync(clientsFile(), JSON.stringify({ clientId: clean })); } catch (err) {}
+    auth.clientId = clean;
+    pushState();
+    return { ok: true };
+  });
+  ipcMain.handle('auth:status', async () => ({
+    configured: auth.configured(), profile: auth.profile()
+  }));
 
-  ipcMain.handle('ffmpeg:retry', async () => {
-    const r = await resolveFfmpeg(true);
-    if (win && !win.isDestroyed()) win.webContents.send('ffmpeg-ready', Object.assign({}, r, { permanentDir: ffBinDir() }));
-    return Object.assign({ ok: r.ok, path: r.path, version: r.version, permanentDir: ffBinDir(), note: r.note }, await ffmpegStatus());
+  // ---- القنوات ----
+  ipcMain.handle('channels:list', async () => {
+    if (!auth.connected()) return { ok: false, error: 'اربط حساب Google أولاً', channels: [] };
+    const r = await yt.listChannels();
+    if (!r.ok) return r;
+    // إذا قناة واحدة ⇒ اختيار تلقائي
+    if (r.channels.length === 1) {
+      selectChannel(r.channels[0]);
+    }
+    return { ok: true, channels: r.channels, selected: settings.channelId };
+  });
+  ipcMain.handle('channels:select', async (e, channelId) => {
+    const r = await yt.listChannels();
+    if (!r.ok) return r;
+    const ch = r.channels.find(c => c.id === channelId);
+    if (!ch) return { ok: false, error: 'القناة غير موجودة ضمن حسابك' };
+    selectChannel(ch);
+    return { ok: true, channel: ch };
+  });
+  ipcMain.handle('categories:list', async () => {
+    if (!auth.connected()) return { ok: false, categories: [] };
+    return yt.categories();
   });
 
-  ipcMain.handle('ffmpeg:pick', async () => {
-    const d = await dialog.showOpenDialog(win, {
-      title: 'اختر ملف ffmpeg.exe',
+  // ---- الفيديو ----
+  ipcMain.handle('video:pick', async () => pickVideo());
+  ipcMain.handle('video:analyze', async (e, file) => analyzeVideo(String(file || '')));
+  ipcMain.handle('video:clear', async () => {
+    live.video = null; settings.videoPath = ''; settings.videoInfo = null; saveSettings(); pushState();
+    return { ok: true };
+  });
+
+  // ---- صورة مصغّرة ----
+  ipcMain.handle('thumbnail:pick', async () => {
+    const r = await dialog.showOpenDialog(win, {
+      title: 'اختر صورة مصغّرة',
+      properties: ['openFile'],
+      filters: [{ name: 'صور', extensions: ['jpg', 'jpeg', 'png'] }]
+    });
+    if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true };
+    const f = r.filePaths[0];
+    // YouTube: حد أقصى 2 ميغابايت
+    const sz = fs.statSync(f).size;
+    if (sz > 2 * 1024 * 1024) return { ok: false, error: 'حجم الصورة يتجاوز 2 ميغابايت (شرط يوتيوب)' };
+    settings.thumbnail = f; saveSettings(); pushState();
+    return { ok: true, thumbnail: f };
+  });
+
+  // ---- البث ----
+  ipcMain.handle('live:start', async (e, o) => startLive(o));
+  ipcMain.handle('live:stop', async () => stopLive({ auto: false }));
+  ipcMain.handle('live:status', async () => {
+    if (!live.broadcast) return { ok: false };
+    const s = await yt.broadcastStatus(live.broadcast.id);
+    return s;
+  });
+  ipcMain.handle('live:openUrl', async (e, url) => {
+    if (/^https:\/\/(www\.)?(youtube\.com|studio\.youtube\.com|youtu\.be)/i.test(url)) shell.openExternal(url);
+    return { ok: true };
+  });
+
+  // ---- أدوات ----
+  ipcMain.handle('tools:status', async () => resolveTools());
+  ipcMain.handle('tools:pickFfmpeg', async () => {
+    const r = await dialog.showOpenDialog(win, {
+      title: 'اختر ملف ffmpeg' + (IS_WIN ? '.exe' : ''),
       properties: ['openFile'],
       filters: [{ name: 'ffmpeg', extensions: IS_WIN ? ['exe'] : ['*'] }]
     });
-    if (d.canceled || !d.filePaths || !d.filePaths[0]) return { ok: false, canceled: true };
-    const src = d.filePaths[0];
-    const perm = installFfmpegPermanent(src);
-    const target = perm || src;
-    const v = await ffmpegWorks(target, 15000);
-    if (v.ok) FFMPEG = target;
-    if (win && !win.isDestroyed()) win.webContents.send('ffmpeg-ready', { ok: v.ok, path: target, version: v.version, permanentDir: ffBinDir() });
-    return { ok: v.ok, path: target, version: v.version, reason: v.reason, permanentDir: ffBinDir() };
+    if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true };
+    const src = r.filePaths[0];
+    const dst = path.join(ffBinDir(), path.basename(src));
+    try { fs.copyFileSync(src, dst); } catch (e) { return { ok: false, error: 'تعذّر نسخ الملف' }; }
+    // ffprobe عادة بجانبه
+    const probeSrc = path.join(path.dirname(src), FFP_NAME);
+    if (fs.existsSync(probeSrc)) { try { fs.copyFileSync(probeSrc, path.join(ffBinDir(), FFP_NAME)); } catch (e) {} }
+    const t = await resolveTools();
+    pushState();
+    return { ok: t.ffmpeg, tools: t, error: t.ffmpeg ? '' : 'الملف لا يعمل كـ ffmpeg' };
   });
+  ipcMain.handle('tools:openDir', async () => { try { await shell.openPath(ffBinDir()); } catch (e) {} return { ok: true }; });
 
-  ipcMain.handle('ffmpeg:openDir', async () => {
-    const d = ffBinDir();
-    try { await shell.openPath(d); } catch (e) {}
-    return { ok: true, dir: d };
-  });
+  ipcMain.handle('shell:open', async (e, url) => { if (/^https?:/i.test(url)) shell.openExternal(url); return { ok: true }; });
+  ipcMain.handle('app:version', async () => ({ version: APP_VERSION }));
+  ipcMain.handle('app:openUserData', async () => { try { await shell.openPath(dataDir()); } catch (e) {} return { ok: true }; });
+}
 
-  ipcMain.handle('app:quit', async () => {
-    quitting = true;
-    app.quit();
-    return { ok: true };
-  });
+function selectChannel(ch) {
+  live.channel = ch;
+  settings.channelId = ch.id;
+  settings.channelTitle = ch.title;
+  settings.channelThumb = ch.thumbnail || '';
+  saveSettings();
+  log('تم اختيار القناة: ' + ch.title, 'ok');
+  pushState();
 }
 
 // ------------------------------------------------------------------ دورة الحياة
-// نسخة واحدة فقط من التطبيق: أي تشغيل ثانٍ يُظهر النافذة الموجودة بدل فتح نسخة جديدة
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => showMainWindow());
+  app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
 
-  app.whenReady().then(() => {
-    // اكتشاف مبدئي سريع (بلا تنفيذ) حتى تعمل الواجهة فوراً
-    for (const c of ffmpegCandidates()) { if (isUsableFf(c)) { FFMPEG = c; break; } }
-    // ثم تحقق فعلي + تثبيت دائم في الخلفية
-    setTimeout(() => {
-      resolveFfmpeg().then(r => {
-        if (win && !win.isDestroyed()) win.webContents.send('ffmpeg-ready', Object.assign({}, r, { permanentDir: ffBinDir() }));
-      }).catch(() => {});
-    }, 1200);
-    loadSettings();
-    ensureAssets();
+  app.whenReady().then(async () => {
+    loadAll();
     Menu.setApplicationMenu(null);
+
+    auth = new GoogleAuth({
+      clientId: settings.clientId,
+      file: oauthFile(),
+      openExternal: u => shell.openExternal(u),
+      log: m => log(m)
+    });
+    yt = new YouTubeApi(auth);
+
+    await resolveTools();
+
     ipc();
-    createTray();
     createWindow();
 
-    // التقاط ESC داخل صفحات المتصفح المدمج (webview) وتحويله للواجهة
-    // حتى يعمل «ESC مرتين للخروج» وأنت داخل الصفحة نفسها
-    app.on('web-contents-created', (e, contents) => {
-      if (contents.getType() === 'webview') {
-        contents.on('before-input-event', (ev, input) => {
-          if (input.type === 'keyDown' && input.key === 'Escape') {
-            safeSend('browser-esc', { ts: Date.now() });
-          }
-        });
-      }
-    });
+    if (!FFMPEG || !FFPROBE) log('تنبيه: ffmpeg/ffprobe غير متاحين — استخدم «اختيار ffmpeg يدوياً»', 'warn');
+    if (!auth.configured()) log('تنبيه: Google OAuth Client ID غير مضبوط بعد', 'warn');
+  });
 
-    app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  app.on('window-all-closed', async () => {
+    if (live.phase === 'live' || live.phase === 'connecting' || live.phase === 'ready') {
+      await stopLive({ auto: true });
+    }
+    app.quit();
+  });
+  app.on('before-quit', async () => {
+    if (live.broadcast && live.phase !== 'done') {
+      try { await yt.transition(live.broadcast.id, 'complete'); } catch (e) {}
+    }
   });
 }
-
-app.on('window-all-closed', () => {
-  // لا خروج تلقائي: النافذة تُخفى للخلفية والبث مستمر.
-  // الخروج النهائي من أيقونة الساعة (خروج نهائي) أو زر «خروج نهائي».
-});
-app.on('before-quit', () => { quitting = true; stopPreview(); stopLive(); });
-process.on('exit', () => { stopPreview(); stopLive(); });

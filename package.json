@@ -1,8 +1,8 @@
 {
   "name": "latchi-stream",
   "productName": "LATCHI STREAM",
-  "version": "3.2.1",
-  "description": "بث مباشر احترافي ليوتيوب — شاشة الحاسوب + صوت النظام، يعمل في الخلفية",
+  "version": "4.0.0",
+  "description": "LATCHI STREAM — بث فيديوهات محلية إلى YouTube مباشرة (Google OAuth + FFmpeg + RTMP)",
   "author": "LATCHI",
   "license": "UNLICENSED",
   "private": true,
@@ -28,10 +28,10 @@
     "files": [
       "main.js",
       "preload.js",
-      "core/**/*",
       "ui/**/*",
+      "core/**/*",
       "assets/**/*",
-      "!**/*.map"
+      "package.json"
     ],
     "extraResources": [
       {
@@ -40,20 +40,14 @@
         "filter": [
           "**/*"
         ]
-      },
-      {
-        "from": "assets/banner-1920x1080.png",
-        "to": "banner-1920x1080.png"
       }
     ],
     "win": {
-      "icon": "assets/icon/icon.ico",
       "target": [
         {
           "target": "nsis",
           "arch": [
-            "x64",
-            "ia32"
+            "x64"
           ]
         },
         {
@@ -63,6 +57,7 @@
           ]
         }
       ],
+      "icon": "assets/icon.ico",
       "artifactName": "LATCHI-STREAM-${version}-${arch}.${ext}"
     },
     "nsis": {
@@ -72,10 +67,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "LATCHI STREAM",
-      "uninstallDisplayName": "LATCHI STREAM",
-      "installerIcon": "assets/icon/icon.ico",
-      "uninstallerIcon": "assets/icon/icon.ico",
-      "installerHeaderIcon": "assets/icon/icon.ico",
+      "artifactName": "LATCHI-STREAM-${version}-Setup.${ext}",
       "deleteAppDataOnUninstall": false
     },
     "portable": {

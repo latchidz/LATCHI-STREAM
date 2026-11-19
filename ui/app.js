@@ -1,1078 +1,348 @@
-// ==============================================================================================
-// LATCHI STREAM 3.0.0 - واجهة التطبيق
-// ==============================================================================================
 'use strict';
+// ==============================================================================================
+// LATCHI STREAM 4.0.0 — واجهة بث الفيديوهات المحلية
+// لا معاينة، لا التقاط شاشة، لا متصفح مدمج. كل زر مربوط بوظيفة حقيقية في العملية الرئيسية.
+// ==============================================================================================
 
-const $  = (s) => document.querySelector(s);
-const $$ = (s) => Array.from(document.querySelectorAll(s));
-const L  = window.latchi;
+const L = window.latchi;
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s)
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
-let S = null;
-let info = null;
-let previewOn = false;
-let streaming = false;
-let pollTimer = null;
-let lowFpsWarned = false;
-let frameTimer = null;
-let restarting = false;   // البث في فترة إعادة اتصال تلقائي
-let escStamps = [];       // أزمنة ضغطات ESC الأخيرة (للخروج المزدوج من المتصفح)
+let S = null;            // آخر حالة من العملية الرئيسية
+let channels = [];
+let logCount = 0;
 
-let box = null;          // منطقة القص بإحداثيات الصورة المعروضة
-let dragging = null;
-let defaultBanner = '';
-let previewStageW = 0, previewStageH = 0;
-
-const PRESETS = {
-  saver:    { outW: 854,  outH: 480,  fps: 15, videoBitrate: '800k',  x264Preset: 'ultrafast', threads: 0 },
-  balanced: { outW: 1280, outH: 720,  fps: 30, videoBitrate: '2500k', x264Preset: 'veryfast',  threads: 0 },
-  high:     { outW: 1280, outH: 720,  fps: 30, videoBitrate: '4000k', x264Preset: 'veryfast',  threads: 0 },
-  portrait: { outW: 720,  outH: 1280, fps: 30, videoBitrate: '2500k', x264Preset: 'veryfast',  threads: 0 }
-};
-const RATIOS = { '16:9': 16/9, '9:16': 9/16, '1:1': 1, '4:3': 4/3 };
-
-// ---------------------------------------------------------------- أدوات
-function toast(msg, kind, ms) {
+// ------------------------------------------------------------------ أدوات
+function toast(msg, bad) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.toggle('bad', !!bad);
+  el.classList.add('on');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('on'), 3400);
+}
+function showErr(title, msg) {
+  $('#errTitle').textContent = title;
+  $('#errMsg').textContent = msg;
+  $('#errBox').classList.add('on');
+}
+function hideErr() { $('#errBox').classList.remove('on'); }
+function hms(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), q = s % 60;
+  return (h ? h + ':' : '') + String(m).padStart(2, '0') + ':' + String(q).padStart(2, '0');
+}
+function addLog(text) {
+  const box = $('#logbox');
+  if (logCount === 0) box.innerHTML = '';
+  logCount++;
   const d = document.createElement('div');
-  d.className = 'toast ' + (kind || '');
-  d.textContent = msg;
-  $('#toasts').appendChild(d);
-  setTimeout(() => { d.style.transition = '.3s'; d.style.opacity = '0'; setTimeout(() => d.remove(), 320); }, ms || 3800);
+  let cls = '';
+  if (/^\[ok\]/.test(text)) cls = 'ok';
+  else if (/^\[err\]/.test(text)) cls = 'err';
+  else if (/^\[warn\]/.test(text)) cls = 'warn';
+  d.className = cls;
+  d.textContent = text.replace(/^\[(ok|err|warn)\]\s*/, p => '');
+  box.appendChild(d);
+  box.scrollTop = box.scrollHeight;
+  while (box.children.length > 300) box.removeChild(box.firstChild);
 }
-function log(msg, kind) {
-  const el = $('#log');
-  const t = new Date();
-  const ts = [t.getHours(), t.getMinutes(), t.getSeconds()].map(x => String(x).padStart(2, '0')).join(':');
-  const d = document.createElement('div');
-  const s1 = document.createElement('span'); s1.className = 't'; s1.textContent = '[' + ts + '] ';
-  const s2 = document.createElement('span'); if (kind) s2.className = kind; s2.textContent = msg;
-  d.appendChild(s1); d.appendChild(s2);
-  el.appendChild(d);
-  el.scrollTop = el.scrollHeight;
-  while (el.children.length > 400) el.removeChild(el.firstChild);
-}
-function setChip(el, state, text) {
-  el.className = 'chip ' + (state || '');
-  const dot = document.createElement('i'); dot.className = 'dot' + (state === 'ok' ? ' pulse' : '');
-  el.innerHTML = ''; el.appendChild(dot); el.appendChild(document.createTextNode(text));
-}
-function busy(btn, on, label) {
-  if (on) {
-    btn.dataset.old = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span>' + (label || 'جارٍ…');
+
+// ------------------------------------------------------------------ رسم الحالة
+function render(st) {
+  S = st;
+  $('#verBadge').textContent = 'v' + st.version;
+
+  // ---- 1) الحساب ----
+  const authOk = st.auth && st.auth.connected;
+  $('#stAuth').textContent = authOk ? 'مربوط' : (st.clientConfigured ? 'غير مربوط' : 'يحتاج إعداد OAuth');
+  $('#stAuth').className = 'st ' + (authOk ? 'ok' : (st.clientConfigured ? 'warn' : 'bad'));
+  $('#authOff').style.display = authOk ? 'none' : 'block';
+  $('#authOn').style.display = authOk ? 'block' : 'none';
+  if (authOk) {
+    $('#acctName').textContent = st.auth.name || 'حساب Google';
+    $('#acctEmail').textContent = st.auth.email || '';
+    const av = $('#acctAvatar');
+    av.innerHTML = st.auth.picture ? `<img src="${esc(st.auth.picture)}">` : '<svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="8" r="3.4" stroke="currentColor" stroke-width="1.7"/><path d="M5 20c0-3.5 3.1-5.6 7-5.6s7 2.1 7 5.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
+  }
+  $('#cardChannel').classList.toggle('gray', !authOk);
+  $('#btnRefreshCh').disabled = !authOk;
+  $('#chHint').textContent = authOk ? '' : 'اربط حساب Google أولاً لجلب قنواتك.';
+
+  // ---- 2) القناة ----
+  const ch = st.channel;
+  $('#stChannel').textContent = ch ? 'مختارة' : 'لم تُختر';
+  $('#stChannel').className = 'st ' + (ch ? 'ok' : 'warn');
+  $('#btnChangeCh').disabled = !authOk;
+
+  // ---- 3) الفيديو ----
+  const v = st.video;
+  $('#cardVideo').classList.toggle('gray', !authOk);
+  if (v && v.ok) {
+    $('#videoEmpty').style.display = 'none';
+    $('#videoBox').style.display = 'block';
+    $('#stVideo').textContent = 'جاهز';
+    $('#stVideo').className = 'st ok';
+    $('#vName').textContent = v.fileName || '';
+    $('#vDur').textContent = v.durationHMS || hms(v.duration);
+    $('#vRes').textContent = v.video.width + '×' + v.video.height;
+    $('#vSize').textContent = (v.sizeMB || 0) + ' MB';
+    $('#vFps').textContent = String(v.video.fps || '—');
+    $('#vCodec').textContent = String(v.video.codec || '').toUpperCase() + (v.video.profile ? ' / ' + v.video.profile : '');
+    $('#vAudio').textContent = v.hasAudio ? (String(v.audio.codec).toUpperCase() + ' ' + v.audio.channels + 'ch') : 'بلا صوت';
+    const strat = $('#vStrat');
+    strat.className = 'strat' + (v.copySafe ? '' : ' tc');
+    strat.textContent = (v.copySafe ? '● ' : '⟳ ') + (v.strategy || '') +
+      (v.hasAudio ? '' : ' — سيُرسل صمت بدل الصوت (لا ميكروفون)');
   } else {
-    btn.disabled = false;
-    if (btn.dataset.old) { btn.innerHTML = btn.dataset.old; delete btn.dataset.old; }
-  }
-}
-function persist(patch) { Object.assign(S, patch); L.setSettings(patch); }
-
-// ---------------------------------------------------------------- الإقلاع
-async function boot() {
-  info = await L.info();
-  S = await L.getSettings();
-  $('#verLine').textContent = 'الإصدار ' + info.version + (info.portable ? ' · محمول' : ' · سطح مكتب');
-
-  setChip($('#chipFfmpeg'), info.ffmpegOk ? 'ok' : 'bad', info.ffmpegOk ? 'ffmpeg جاهز' : 'ffmpeg مفقود');
-
-  defaultBanner = info.bundledBanner || info.bannerPath || '';
-  applyBanner(S.bannerPath || defaultBanner, false);
-
-  // خط العنوان الافتراضي
-  if (!S.titleFont) {
-    const fd = await L.defaultFont();
-    if (fd.ok) { S.titleFont = fd.path; persist({ titleFont: fd.path }); }
+    $('#videoEmpty').style.display = 'block';
+    $('#videoBox').style.display = 'none';
+    $('#stVideo').textContent = 'لم يُختر';
+    $('#stVideo').className = 'st warn';
   }
 
-  // المفتاح
-  const ke = await L.keyEmbedded();
-  if (ke.hasKey) {
-    setChip($('#chipKey'), 'ok', 'المفتاح مدمج');
-    $('#keyLine').textContent = 'مفتاح مدمج ومخفي داخل التطبيق: ' + ke.masked;
-  } else {
-    setChip($('#chipKey'), 'warn', 'أدخل المفتاح');
-    $('#keyLine').textContent = 'لا مفتاح مدمج — الصق مفتاحك من YouTube Studio.';
-  }
+  // ---- 4) الإعدادات ----
+  const m = st.settings;
+  if (document.activeElement !== $('#inTitle')) $('#inTitle').value = m.title || '';
+  if (document.activeElement !== $('#inDesc')) $('#inDesc').value = m.description || '';
+  $('#titleCount').textContent = ($('#inTitle').value || '').length + ' / 100';
+  const pr = document.querySelector(`input[name=priv][value="${m.privacy || 'unlisted'}"]`);
+  if (pr) pr.checked = true;
+  $('#inKids').checked = !!m.madeForKids;
+  if (m.categoryId) $('#inCategory').value = m.categoryId;
+  $('#thumbName').textContent = m.thumbnail ? m.thumbnail.split(/[\\/]/).pop() : 'لم تُختر';
 
-  fillForm();
-  bindEvents();
+  // ---- 5) التشغيل ----
+  const phase = st.phase || 'idle';
+  const phaseMap = {
+    idle: ['جاهز', ''], preparing: ['تجهيز البث…', 'warn'], connecting: ['جارٍ الاتصال بـ YouTube…', 'warn'],
+    ready: ['YouTube جاهز', 'ok'], live: ['مباشر الآن', 'ok'], stopping: ['جارٍ الإيقاف…', 'warn'],
+    done: ['انتهى البث', 'ok'], error: ['خطأ', 'bad']
+  };
+  const pm = phaseMap[phase] || ['جاهز', ''];
+  $('#stLive').textContent = pm[0];
+  $('#stLive').className = 'st ' + pm[1];
 
-  // أبعاد الشاشة الحقيقية — تُحفظ في الخلفية وإلا بقي القص مقيّداً بـ 1920×1080
-  try {
-    S.screenW = Math.round(window.screen.width * (window.devicePixelRatio || 1));
-    S.screenH = Math.round(window.screen.height * (window.devicePixelRatio || 1));
-  } catch (e) { S.screenW = 1920; S.screenH = 1080; }
-  const dims = { screenW: S.screenW, screenH: S.screenH };
-  if (!S.cropW || S.cropW > S.screenW || !S.cropH || S.cropH > S.screenH) {
-    Object.assign(dims, { cropX: 0, cropY: 0, cropW: S.screenW, cropH: S.screenH });
-    S.cropX = 0; S.cropY = 0; S.cropW = S.screenW; S.cropH = S.screenH;
-  }
-  persist(dims);
+  const running = ['preparing', 'connecting', 'ready', 'live', 'stopping'].includes(phase);
+  $('#liveBox').classList.toggle('on', ['connecting', 'ready', 'live', 'stopping', 'done'].includes(phase));
+  $('#btnStop').style.display = (running && phase !== 'stopping') ? 'inline-flex' : 'none';
+  $('#btnStart').style.display = (running || phase === 'error') ? 'none' : 'inline-flex';
+  $('#btnStart').disabled = !(authOk && ch && v && st.tools.ffmpeg && st.tools.ffprobe);
 
-  await refreshAudio();
-  const enc = await L.encodersList();
-  log('المُرمِّزات: ' + enc.encoders.join(', '), 'ok');
-  // ★ لا نستبدل المُرمِّز إلا إذا كان الحالي غير متاح فعلاً (نُبقي libx264 لأنه الأنسب للشاشة)
-  if (!enc.encoders.includes(S.encoder)) {
-    const pref = ['libx264', 'h264_qsv', 'h264_amf', 'h264_nvenc'].find(e => enc.encoders.includes(e)) || enc.encoders[0];
-    S.encoder = pref;
-    persist({ encoder: S.encoder });
-    log('المُرمِّز المُختار: ' + pref, 'info');
-  }
+  // مؤشر الحالة
+  const dot = $('#lvDot');
+  dot.className = 'dot' + (phase === 'live' ? ' live' : phase === 'ready' ? ' ready'
+    : (phase === 'connecting' || phase === 'preparing') ? ' conn' : '');
+  $('#lvPhase').textContent = pm[0];
 
-  L.windowList().then(r => fillWindows(r.windows));
+  // التقدم
+  const dur = st.duration || 0;
+  const cur = (st.progress && st.progress.outTimeMs ? st.progress.outTimeMs / 1000000 : st.elapsed) || 0;
+  $('#lvTime').textContent = hms(cur) + ' / ' + hms(dur);
+  $('#lvBar').style.width = dur > 0 ? Math.min(100, (cur / dur) * 100) + '%' : '0%';
+  $('#stFrame').textContent = (st.progress && st.progress.frame) || 0;
+  $('#stFps').textContent = (st.progress && st.progress.fps) || 0;
+  $('#stRate').textContent = (st.progress && st.progress.bitrate) || '—';
+  $('#stSpeed').textContent = (st.progress && st.progress.speed) || '—';
+  $('#stDrop').textContent = (st.progress && st.progress.dropFrames) || 0;
 
-  // بوابة البداية
-  if (!info.ffmpegOk) {
-    $('#gateHint').innerHTML = 'ملف <b>ffmpeg.exe</b> غير موجود، ولا يمكن البث بدونه.<br>' +
-      '<span style="font-size:11.5px;color:#7b8fb0">ضع ffmpeg.exe بجانب التطبيق أو في مجلد resources\\ffmpeg</span>';
-    $('#gateActions').innerHTML = '<button class="btn ghost" id="gateGo">متابعة</button>';
-  } else {
-    $('#gateHint').innerHTML = 'جاهز للانطلاق.<br><span style="font-size:11.5px;color:#7b8fb0">«بدء البث» يبثّ شاشتك مباشرة على يوتيوب. الإغلاق (X) يخفي التطبيق للخلفية والبث يستمر.</span>';
-    $('#gateActions').innerHTML = '<button class="btn green" id="gateGo">ابدأ</button>';
-  }
-  $('#gateGo').onclick = () => { $('#gate').style.display = 'none'; };
+  // روابط
+  const hasBr = !!st.broadcast;
+  $('#btnWatch').disabled = !hasBr;
+  $('#btnStudio').disabled = !hasBr;
 
-  frameTimerPre = null;
-  startPolling();
-  log('التطبيق جاهز — v' + info.version, 'ok');
-}
-let frameTimerPre = null;
+  // تلميح البدء
+  const missing = [];
+  if (!authOk) missing.push('ربط الحساب');
+  if (!ch) missing.push('اختيار القناة');
+  if (!v) missing.push('اختيار الفيديو');
+  if (!st.tools.ffmpeg) missing.push('ffmpeg');
+  if (!st.tools.ffprobe) missing.push('ffprobe');
+  $('#startHint').textContent = missing.length ? ('ينقص: ' + missing.join(' · ')) : 'كل شيء جاهز — اضغط START LIVE STREAM';
 
-// ---------------------------------------------------------------- النموذج
-function fillForm() {
-  $('#selRes').value = S.outW + 'x' + S.outH;
-  $('#selFps').value = String(S.fps);
-  $('#selBitrate').value = String(S.videoBitrate);
-
-  $$('#presetSeg button').forEach(b => b.classList.toggle('on', b.dataset.preset === S.preset));
-  $$('#modeSeg button').forEach(b => b.classList.toggle('on', b.dataset.mode === S.captureMode));
-  $$('#ratioSeg button').forEach(b => b.classList.toggle('on', b.dataset.ratio === S.ratio));
-
-  $('#selWindow').disabled = S.captureMode === 'desktop';
-  $('#chkMouse').checked = !!S.drawMouse;
-
-  $('#chkBanner').checked = !!S.bannerEnabled;
-  $('#numBannerDur').value = S.bannerDuration || 10;
-  $('#chkTitle').checked = !!S.titleEnabled;
-  $('#txtTitle').value = S.streamTitle || 'GTA VI LIVE STREAMING';
-  $('#numTitleSize').value = S.titleSize || 44;
-  $('#selTitlePos').value = S.titlePosition || 'topcenter';
-  $('#txtTitleColor').value = S.titleColor || '#ffffff';
-  $('#fontLine').textContent = S.titleFont ? ('الخط: ' + String(S.titleFont).split(/[\\/]/).pop()) : 'الخط: افتراضي';
-
-  $('#rngZoom').value = 100;
-  $('#lblZoom').textContent = '1.0×';
-  updateModeHint();
-  updateKeyField();
-  renderBannerOverlay();
-  renderTitleOverlay();
+  // أخطاء
+  if (st.error && phase === 'error') showErr('فشل البث', st.error);
+  else hideErr();
 }
 
-function updateModeHint() {
-  const el = $('#modeHint');
-  if (!el || !S) return;
-  const m = S.captureMode;
-  if (m === 'desktop') {
-    el.innerHTML = 'يبثّ شاشتك كاملة — تنقّل في الحاسوب كما تشاء والبث مستمر.';
-  } else if (m === 'window') {
-    el.innerHTML = '<b>نافذة:</b> تبثّ نافذة واحدة. إن أغلقتها أو صغّرتها يتوقف البث — ' +
-      'استعمل «لعبة / تطبيق» إن أردت التنقّل بحرية.';
-  } else {
-    el.innerHTML = '<b>لعبة / تطبيق:</b> يقتطع النافذة المختارة من الشاشة ويبثّها. ' +
-      'تبقى النافذة في المقدّمة أثناء البث، وباقي الحاسوب خارج البث.';
-  }
+// ------------------------------------------------------------------ القنوات
+async function loadChannels() {
+  const r = await L.listChannels();
+  if (!r.ok) { toast(r.error || 'تعذّر جلب القنوات', true); return; }
+  channels = r.channels || [];
+  renderChannels(r.selected);
+  if (channels.length === 0) toast('لا توجد قناة YouTube في هذا الحساب', true);
+  else if (channels.length === 1) toast('تم اختيار قناتك تلقائياً: ' + channels[0].title);
 }
 
-function updateKeyField() {
-  const t = $('#txtKey');
-  t.type = $('#chkKeyMask').checked ? 'password' : 'text';
-  t.value = S.youtubeKey || '';
-  t.placeholder = S.youtubeKey ? 'مفتاح محفوظ — اكتب لتغييره' : 'أدخل مفتاح البث';
-}
-
-// ---------------------------------------------------------------- الربط
-let binded = false;
-function bindEvents() {
-  if (binded) return;
-  binded = true;
-
-  /* ---------------- الجودة ---------------- */
-  $$('#presetSeg button').forEach(b => b.onclick = () => {
-    $$('#presetSeg button').forEach(x => x.classList.remove('on'));
-    b.classList.add('on');
-    const t = PRESETS[b.dataset.preset];
-    S.preset = b.dataset.preset;
-    Object.assign(S, t);
-    $('#selRes').value = S.outW + 'x' + S.outH;
-    $('#selFps').value = String(S.fps);
-    $('#selBitrate').value = String(S.videoBitrate);
-    persist({ preset: S.preset, outW: S.outW, outH: S.outH, fps: S.fps,
-              videoBitrate: S.videoBitrate, x264Preset: S.x264Preset, threads: S.threads });
-    log('الوضع: ' + b.textContent.trim() + ' — ' + S.outW + '×' + S.outH + ' @' + S.fps + ' · ' + S.videoBitrate);
+function renderChannels(selectedId) {
+  const box = $('#chList');
+  if (!channels.length) { box.innerHTML = ''; return; }
+  box.innerHTML = channels.map(c => {
+    const sel = c.id === selectedId ? ' sel' : '';
+    const av = c.thumbnail ? `<img src="${esc(c.thumbnail)}">` : '<svg width="17" height="17" viewBox="0 0 24 24" fill="none"><rect x="3" y="7" width="18" height="12" rx="2.5" stroke="currentColor" stroke-width="1.7"/><path d="M8 3.5 12 7l4-3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>';
+    return `<div class="ch${sel}" data-id="${esc(c.id)}">
+      <div class="av">${av}</div>
+      <div class="t"><b>${esc(c.title)}</b><span>${c.subscribers.toLocaleString('en')} مشترك · ${c.videos} فيديو</span></div>
+      ${c.id === selectedId ? '<span class="tick">✓</span>' : ''}
+    </div>`;
+  }).join('');
+  box.querySelectorAll('.ch').forEach(el => {
+    el.addEventListener('click', async () => {
+      const r = await L.selectChannel(el.dataset.id);
+      if (r.ok) {
+        renderChannels(el.dataset.id);
+        toast('تم اختيار القناة: ' + r.channel.title);
+        refresh();
+      } else toast(r.error || 'تعذّر اختيار القناة', true);
+    });
   });
-  $('#selRes').onchange = e => { const p = e.target.value.split('x').map(Number); S.outW = p[0]; S.outH = p[1]; persist({ outW: S.outW, outH: S.outH }); };
-  $('#selFps').onchange = e => { S.fps = Number(e.target.value); persist({ fps: S.fps }); };
-  $('#selBitrate').onchange = e => { S.videoBitrate = e.target.value; persist({ videoBitrate: S.videoBitrate }); };
-
-  /* ---------------- المصدر ---------------- */
-  $$('#modeSeg button').forEach(b => b.onclick = () => {
-    $$('#modeSeg button').forEach(x => x.classList.remove('on'));
-    b.classList.add('on');
-    S.captureMode = b.dataset.mode;
-    $('#selWindow').disabled = S.captureMode === 'desktop';
-    persist({ captureMode: S.captureMode });
-    updateModeHint();
-    log('المصدر: ' + b.textContent.trim());
-    if (previewOn) restartPreview();
-  });
-  $('#selWindow').onchange = e => {
-    S.windowTitle = e.target.value;
-    persist({ windowTitle: S.windowTitle });
-    if (previewOn) restartPreview();
-  };
-  $('#btnRefreshWin').onclick = async () => {
-    const r = await L.windowList();
-    fillWindows(r.windows);
-    toast('تم تحديث القائمة: ' + (r.windows || []).length + ' نافذة', 'ok', 2400);
-  };
-  $('#btnPickWinMouse').onclick = async () => {
-    openModal('اختيار نافذة بالماوس',
-      'سيُخفى التطبيق ثانيتين، ثم يُقرأ اسم النافذة التي تحت مؤشر الفأرة.<br>' +
-      '<b style="color:#ffd79a">حرّك مؤشر الفأرة فوق النافذة المطلوبة قبل انتهاء العد.</b>');
-    $('#mBody').innerHTML = '<button class="btn blue full" id="pickGo">ابدأ الآن</button>';
-    $('#pickGo').onclick = async () => {
-      busy($('#pickGo'), true, 'جارٍ الاختيار…');
-      $('#modal').classList.remove('on');
-      const r = await L.pickWindowMouse();
-      if (!r.ok) { toast('تعذّر الاختيار: ' + (r.error || ''), 'bad', 5000); return; }
-      S.windowTitle = r.title;
-      S.captureMode = 'window';
-      persist({ windowTitle: r.title, captureMode: 'window' });
-      $$('#modeSeg button').forEach(x => x.classList.toggle('on', x.dataset.mode === 'window'));
-      $('#selWindow').disabled = false;
-      const sel = $('#selWindow');
-      if (!Array.from(sel.options).some(o => o.value === r.title)) {
-        const o = document.createElement('option'); o.value = r.title; o.textContent = r.title; sel.appendChild(o);
-      }
-      sel.value = r.title;
-      toast('النافذة: ' + r.title, 'ok', 4200);
-      log('اختيار بالماوس: ' + r.title, 'ok');
-      if (previewOn) restartPreview();
-    };
-  };
-  $('#chkMouse').onchange = e => { S.drawMouse = e.target.checked; persist({ drawMouse: S.drawMouse }); };
-
-  /* ---------------- الصوت ---------------- */
-  $('#btnRefreshAudio').onclick = () => refreshAudio(true);
-  $('#selAudio').onchange = e => { S.audioDevice = e.target.value; persist({ audioDevice: S.audioDevice }); };
-
-  /* ---------------- النسبة والزوم ---------------- */
-  $$('#ratioSeg button').forEach(b => b.onclick = () => {
-    $$('#ratioSeg button').forEach(x => x.classList.remove('on'));
-    b.classList.add('on');
-    S.ratio = b.dataset.ratio;
-    persist({ ratio: S.ratio });
-    applyRatio();
-  });
-  $('#rngZoom').oninput = e => {
-    const z = Number(e.target.value) / 100;
-    $('#lblZoom').textContent = z.toFixed(1) + '×';
-    applyZoom(z);
-  };
-  $('#btnResetCrop').onclick = () => {
-    box = null;
-    $('#rngZoom').value = 100; $('#lblZoom').textContent = '1.0×';
-    S.ratio = 'free';
-    $$('#ratioSeg button').forEach(x => x.classList.toggle('on', x.dataset.ratio === 'free'));
-    S.cropX = 0; S.cropY = 0; S.cropW = S.screenW; S.cropH = S.screenH;
-    persist({ cropX: 0, cropY: 0, cropW: S.screenW, cropH: S.screenH, ratio: 'free' });
-    renderCropBox(null);
-    toast('ملء الشاشة', 'ok', 2000);
-  };
-  $('#btnSaveCrop').onclick = () => {
-    const c = cropToScreen();
-    S.cropX = c.x; S.cropY = c.y; S.cropW = c.w; S.cropH = c.h;
-    persist({ cropX: c.x, cropY: c.y, cropW: c.w, cropH: c.h, ratio: S.ratio });
-    toast('حُفظ الاختيار: ' + c.w + '×' + c.h + ' من النقطة (' + c.x + '، ' + c.y + ')', 'ok', 4200);
-    log('حفظ القص: ' + c.w + '×' + c.h + '@' + c.x + ',' + c.y, 'ok');
-    box = { x: box ? box.x : 0, y: box ? box.y : 0, w: box ? box.w : 0, h: box ? box.h : 0 };
-  };
-
-  /* ---------------- المعاينة ---------------- */
-  $('#btnPrevStart').onclick = async () => {
-    if (!(await checkFfmpeg(true)).ok) return;   // لا نُقلع معاينة بلا ffmpeg
-    return startPreview();
-  };
-  $('#btnPrevStop').onclick = stopPreview;
-  $('#btnPrevSave').onclick = savePreviewShot;
-
-  /* ---------------- البث ---------------- */
-  $('#btnStreamStart').onclick = async () => {
-    if (!(await checkFfmpeg(true)).ok) return;   // لا نُقلع بثاً بلا ffmpeg
-    return startStream();
-  };
-  $('#btnStreamStop').onclick = stopStream;
-  $('#btnKeyTest').onclick = testKey;
-
-  /* ---------------- البانر ---------------- */
-  $('#bannerBox').onclick = async () => {
-    const r = await L.pickImage();
-    if (!r.ok) return;
-    S.bannerPath = r.path;
-    persist({ bannerPath: r.path });
-    applyBanner(r.path, true);
-    toast('تم تغيير البانر', 'ok');
-  };
-  $('#btnBannerReset').onclick = () => {
-    S.bannerPath = defaultBanner;
-    persist({ bannerPath: defaultBanner, bannerEnabled: true });
-    applyBanner(defaultBanner, true);
-    $('#chkBanner').checked = true;
-    renderBannerOverlay();
-    toast('استُعيد البانر الرسمي', 'ok');
-  };
-  $('#chkBanner').onchange = e => { S.bannerEnabled = e.target.checked; persist({ bannerEnabled: S.bannerEnabled }); renderBannerOverlay(); renderTitleOverlay(); };
-  $('#numBannerDur').onchange = e => { S.bannerDuration = Number(e.target.value); persist({ bannerDuration: S.bannerDuration }); };
-
-  /* ---------------- العنوان ---------------- */
-  $('#chkTitle').onchange = e => { S.titleEnabled = e.target.checked; persist({ titleEnabled: S.titleEnabled }); renderTitleOverlay(); };
-  $('#txtTitle').oninput = e => { S.streamTitle = e.target.value; renderTitleOverlay(); };
-  $('#txtTitle').onchange = e => { S.streamTitle = e.target.value; persist({ streamTitle: S.streamTitle }); };
-  $('#numTitleSize').onchange = e => { S.titleSize = Number(e.target.value); persist({ titleSize: S.titleSize }); renderTitleOverlay(); };
-  $('#selTitlePos').onchange = e => { S.titlePosition = e.target.value; persist({ titlePosition: S.titlePosition }); renderTitleOverlay(); };
-  $('#txtTitleColor').onchange = e => { S.titleColor = e.target.value; persist({ titleColor: S.titleColor }); renderTitleOverlay(); };
-  $('#btnPickFont').onclick = async () => {
-    const r = await L.pickFont();
-    if (!r.ok) return;
-    S.titleFont = r.path;
-    persist({ titleFont: r.path });
-    $('#fontLine').textContent = 'الخط: ' + String(r.path).split(/[\\/]/).pop();
-    toast('تم اختيار الخط', 'ok');
-  };
-
-  /* ---------------- المفتاح ---------------- */
-  $('#chkKeyMask').onchange = updateKeyField;
-  $('#btnSaveKey').onclick = () => {
-    const v = $('#txtKey').value.trim();
-    if (!v) { toast('المفتاح فارغ', 'warn'); return; }
-    S.youtubeKey = v;
-    persist({ youtubeKey: v });
-    setChip($('#chipKey'), 'ok', 'المفتاح محفوظ');
-    toast('تم حفظ المفتاح', 'ok');
-    log('حُفظ مفتاح البث (مخفي)', 'ok');
-  };
-
-  /* ---------------- المتصفح المدمج ---------------- */
-  $('#btnBrowserTop').onclick = openBrowser;
-  $('#btnBrowserClose').onclick = closeBrowser;
-  $('#btnBrowserGo').onclick = goBrowser;
-  $('#btnBrowserBack').onclick = () => {
-    const wv = document.querySelector('#browserStage webview');
-    if (wv && wv.canGoBack && wv.canGoBack()) wv.goBack();
-  };
-  $('#btnBrowserFwd').onclick = () => {
-    const wv = document.querySelector('#browserStage webview');
-    if (wv && wv.canGoForward && wv.canGoForward()) wv.goForward();
-  };
-  $('#btnBrowserReload').onclick = () => {
-    const wv = document.querySelector('#browserStage webview');
-    if (wv) { try { wv.reload(); } catch (e) {} }
-  };
-  $('#browserUrl').onkeydown = e => { if (e.key === 'Enter') goBrowser(); };
-  $$('[data-open]').forEach(b => b.onclick = () => {
-    $('#browserUrl').value = b.dataset.open;
-    openBrowser();
-    goBrowser();
-  });
-
-  /* ---------------- شاشة كاملة ---------------- */
-  $('#btnFull').onclick = async () => {
-    await L.setFullscreen(true);
-    toast('شاشة كاملة — اضغط Esc للخروج', 'ok', 2600);
-  };
-
-  /* ---------------- الخلفية والخروج ---------------- */
-  $('#btnHide').onclick = () => {
-    toast(streaming ? 'سيُخفى التطبيق — البث يبقى شغالاً على يوتيوب ✓' : 'سيُخفى التطبيق إلى الخلفية', 'ok', 1600);
-    setTimeout(() => L.hideToTray(), 700);
-  };
-  $('#btnQuit').onclick = () => {
-    openModal('خروج نهائي',
-      streaming ? 'البث يعمل الآن على يوتيوب — سيتم إيقافه ثم إغلاق التطبيق نهائياً.<br>إن أردت أن يبقى البث شغالاً، استعمل «إخفاء للخلفية» بدل الخروج.'
-                : 'سيتم إغلاق التطبيق نهائياً.');
-    $('#mBody').innerHTML = '<button class="btn red full" id="quitGo">تأكيد الخروج النهائي</button>';
-    $('#quitGo').onclick = () => L.quitApp();
-  };
-
-  /* ---------------- إعادة الاتصال التلقائي ---------------- */
-  L.onStreamRestarting(d => {
-    restarting = true;
-    const b = $('#liveBadge');
-    if (b) {
-      b.classList.add('on');
-      $('#liveTime').textContent = 'إعادة اتصال ' + d.attempt + '/' + d.max;
-    }
-    toast('انقطع البث — إعادة اتصال تلقائي (' + d.attempt + '/' + d.max + ')…', 'warn', 6000);
-    log(d.error || 'إعادة اتصال…', 'warn');
-  });
-  L.onStreamRestarted(d => {
-    restarting = false;
-    toast('✓ عاد البث للعمل بعد إعادة الاتصال', 'ok', 4200);
-    log('عاد البث للعمل (محاولة ' + d.attempt + ')', 'ok');
-  });
-
-  /* ---------------- من الخلفية ---------------- */
-  L.onLog(m => log(m));
-  L.onStreamEnded(d => {
-    restarting = false;
-    streaming = false; reflectStream(false);
-    toast('توقف البث: ' + (d.error || ''), 'bad', 8000);
-    log('توقف البث — ' + (d.error || ''), 'bad');
-  });
-
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') handleEsc();
-  });
-  // ESC القادم من داخل صفحات المتصفح المدمج (يُحال من العملية الرئيسية)
-  L.onBrowserEsc(() => handleEsc());
-
-  setupCropDrag();
-  window.addEventListener('resize', () => { if (previewOn) sizeStage(); });
 }
 
-// ESC: مرتان بسرعة للخروج من المتصفح المدمج، وإلا فالأدوار الاعتيادية
-function handleEsc() {
-  const browserOn = $('#browserArea').classList.contains('on');
-  if (browserOn) {
-    const now = Date.now();
-    escStamps = escStamps.filter(t => now - t < 900);
-    escStamps.push(now);
-    if (escStamps.length >= 2) {
-      escStamps = [];
-      closeBrowser();
-      toast('أُغلق المتصفح المدمج', 'ok', 1800);
-    } else {
-      toast('اضغط ESC مرة أخرى للخروج من المتصفح', 'warn', 1600);
-    }
-    return;
-  }
-  escStamps = [];
-  $('#modal').classList.remove('on');
-  L.setFullscreen(false);
-}
+// ------------------------------------------------------------------ الأحداث
+async function refresh() { render(await L.state()); }
 
-// ---------------------------------------------------------------- النوافذ
-function fillWindows(list) {
-  const sel = $('#selWindow');
-  const cur = S.windowTitle || '';
-  sel.innerHTML = '<option value="">— اختر نافذة —</option>';
-  (list || []).forEach(w => {
-    const o = document.createElement('option');
-    o.value = w; o.textContent = w.length > 60 ? w.slice(0, 60) + '…' : w;
-    sel.appendChild(o);
-  });
-  if (cur) {
-    if (!Array.from(sel.options).some(o => o.value === cur)) {
-      const o = document.createElement('option'); o.value = cur; o.textContent = cur; sel.appendChild(o);
-    }
-    sel.value = cur;
-  }
-}
-
-// ---------------------------------------------------------------- الصوت
-async function refreshAudio(notify) {
-  const r = await L.audioList();
-  const sel = $('#selAudio');
-  sel.innerHTML = '';
-  if (!r.devices.length) {
-    const o = document.createElement('option');
-    o.value = ''; o.textContent = '— لا جهاز صوت نظام —'; sel.appendChild(o);
-    setChip($('#chipAudio'), 'warn', 'لا صوت نظام');
-  } else {
-    r.devices.forEach(d => { const o = document.createElement('option'); o.value = d; o.textContent = d; sel.appendChild(o); });
-    let i = r.devices.indexOf(S.audioDevice);
-    if (i < 0) i = 0;
-    sel.value = r.devices[i];
-    if (S.audioDevice !== sel.value) { S.audioDevice = sel.value; persist({ audioDevice: sel.value }); }
-    setChip($('#chipAudio'), 'ok', 'صوت النظام');
-  }
-  if (notify) toast('أجهزة الصوت: ' + r.devices.length + (r.blocked.length ? ' · حُجب ' + r.blocked.length + ' ميكروفون' : ''), 'ok', 3000);
-  if (r.blocked.length) log('ميكروفونات محجوبة: ' + r.blocked.join(' · '), 'warn');
-}
-
-// ---------------------------------------------------------------- البانر
-function applyBanner(p, bust) {
-  const img = $('#bannerImg');
-  const layer = $('#prevBannerLayer');
-  if (!p) { img.removeAttribute('src'); if (layer) layer.style.backgroundImage = 'none'; return; }
-  let url = 'file:///' + String(p).replace(/\\/g, '/');
-  if (bust) url += '?t=' + Date.now();
-  img.src = url;
-  if (layer) layer.style.backgroundImage = 'url("' + url + '")';
-  renderBannerOverlay();
-}
-
-// ---------------------------------------------------------------- طبقة البانر/العنوان في المعاينة
-function renderTitleOverlay() {
-  const el = $('#prevTitleLayer');
-  if (!el) return;
-  const on = previewOn && S && S.titleEnabled && String(S.streamTitle || '').trim();
-  el.style.display = on ? 'block' : 'none';
-  el.textContent = S ? (S.streamTitle || '') : '';
-  if (!S) return;
-  const base = previewStageW || 640;
-  const fs = Math.max(10, Math.round((S.titleSize || 44) * (base / (S.outW || 1280))));
-  el.style.fontSize = fs + 'px';
-  el.style.color = S.titleColor || '#fff';
-  el.style.background = /^#?[0-9a-f]{6}$/i.test((S.titleBoxColor || '').replace('black@', ''))
-    ? 'rgba(0,0,0,.55)' : 'rgba(0,0,0,.55)';
-  const pos = S.titlePosition || 'topcenter';
-  el.style.left = pos.includes('left') ? '4%' : (pos.includes('right') ? 'auto' : '50%');
-  el.style.right = pos.includes('right') ? '4%' : 'auto';
-  el.style.transform = pos.includes('left') || pos.includes('right') ? 'none' : 'translateX(-50%)';
-  el.style.top = pos.startsWith('top') ? '6%' : (pos === 'center' ? '50%' : 'auto');
-  el.style.bottom = pos === 'bottomcenter' ? '8%' : 'auto';
-  if (pos === 'center') el.style.transform = 'translate(-50%,-50%)';
-}
-
-function renderBannerOverlay() {
-  const b = $('#prevBannerLayer');
-  if (!b) return;
-  const on = previewOn && S && S.bannerEnabled && $('#bannerImg').getAttribute('src');
-  b.style.display = on ? 'block' : 'none';
-}
-
-// ---------------------------------------------------------------- المعاينة
-async function startPreview() {
-  if (previewOn) return;
-  const btn = $('#btnPrevStart');
-  busy(btn, true, 'جارٍ البدء…');
-  const r = await L.previewStart({
-    captureMode: S.captureMode, windowTitle: S.windowTitle,
-    drawMouse: S.drawMouse, previewFps: 8, previewWidth: 720
-  });
-  busy(btn, false);
-  if (!r.ok) {
-    toast('فشل المعاينة: ' + (r.error || ''), 'bad', 7000);
-    log('فشل المعاينة: ' + (r.error || ''), 'bad');
-    return;
-  }
-  previewOn = true;
-  $('#prevIdle').style.display = 'none';
-  $('#prevImg').style.display = 'block';
-  showLivePanel(false);
-  renderBannerOverlay();
-  renderTitleOverlay();
-  $('#btnPrevStop').disabled = false;
-  log('بدأت المعاينة (8 إطارات · مخففة)', 'ok');
-  startFrames();
-}
-
-async function stopPreview() {
-  await L.previewStop();
-  previewOn = false;
-  stopFrames();
-  $('#btnPrevStop').disabled = true;
-  const img = $('#prevImg');
-  img.style.display = 'none';
-  img.removeAttribute('src');
-  img.style.width = ''; img.style.height = '';
-  $('#prevIdle').style.display = 'grid';
-  $('#cropLayer').classList.remove('on');
-  renderBannerOverlay();
-  renderTitleOverlay();
-  showLivePanel(false);
-  log('أُوقفت المعاينة', 'ok');
-  toast('تم إيقاف المعاينة', 'ok', 2400);
-}
-
-async function restartPreview() {
-  if (!previewOn) return;
-  await L.previewStop();
-  await new Promise(r => setTimeout(r, 300));
-  await L.previewStart({ captureMode: S.captureMode, windowTitle: S.windowTitle,
-                         drawMouse: S.drawMouse, previewFps: 8, previewWidth: 720 });
-  log('أُعيد تشغيل المعاينة بالمصدر الجديد', 'ok');
-}
-
-function startFrames() {
-  stopFrames();
-  let fails = 0;
-  frameTimer = setInterval(async () => {
-    if (!previewOn) return;
-    const r = await L.previewFrame();
-    if (!r.on) {
-      if (++fails > 10) { stopPreview(); toast('توقفت المعاينة من المصدر', 'warn', 5000); }
-      return;
-    }
-    fails = 0;
-    if (!r.frame) return;
-    const img = $('#prevImg');
-    img.onload = () => { sizeStage(); };
-    img.src = r.frame;
-    $('#cropLayer').classList.add('on');
-  }, 250);
-}
-function stopFrames() { if (frameTimer) { clearInterval(frameTimer); frameTimer = null; } }
-
-function sizeStage() {
-  const img = $('#prevImg');
-  const wrap = $('#prevImgWrap');
-  const host = document.querySelector('.previewWrap');
-  if (!img.naturalWidth) return;
-  const maxW = host.clientWidth - 18;
-  const maxH = host.clientHeight - 18;
-  const k = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight, 1);
-  previewStageW = Math.round(img.naturalWidth * k);
-  previewStageH = Math.round(img.naturalHeight * k);
-  img.style.width = previewStageW + 'px';
-  img.style.height = previewStageH + 'px';
-  wrap.style.width = previewStageW + 'px';
-  wrap.style.height = previewStageH + 'px';
-  renderCropBox(box);
-  renderBannerOverlay();
-  renderTitleOverlay();
-}
-
-// ---------------------------------------------------------------- حفظ صورة المعاينة
-async function savePreviewShot() {
-  if (!previewOn) { toast('شغّل المعاينة أولاً', 'warn'); return; }
-  // نرسم الصورة + البانر + العنوان على canvas ونحفظها
-  const img = $('#prevImg');
-  if (!img.src) { toast('لا إطار بعد', 'warn'); return; }
-  const cv = document.createElement('canvas');
-  const W = (S.cropW || S.screenW), H = (S.cropH || S.screenH);
-  cv.width = W; cv.height = H;
-  const ctx = cv.getContext('2d');
-  const sx = (img.naturalWidth || 1) / (S.screenW || 1);
-  const sy = (img.naturalHeight || 1) / (S.screenH || 1);
-  try {
-    ctx.drawImage(img, (S.cropX || 0) * sx, (S.cropY || 0) * sy,
-                  W * sx, H * sy, 0, 0, W, H);
-  } catch (e) {
-    ctx.drawImage(img, 0, 0, W, H);
-  }
-  // البانر
-  if (S.bannerEnabled) {
-    const src = $('#bannerImg');
-    if (src && src.complete && src.naturalWidth) {
-      ctx.drawImage(src, 0, 0, W, H);
-    }
-  }
-  // العنوان
-  if (S.titleEnabled && S.streamTitle) {
-    const fs = (S.titleSize || 44) * (W / (S.outW || 1280));
-    ctx.font = '700 ' + Math.round(fs) + 'px "Segoe UI",Tahoma,sans-serif';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const tw = ctx.measureText(S.streamTitle).width;
-    let cx = W / 2, cy = H * 0.06 + fs / 2;
-    const pos = S.titlePosition || 'topcenter';
-    if (pos === 'center') cy = H / 2;
-    if (pos === 'bottomcenter') cy = H - H * 0.08;
-    if (pos === 'topleft') { ctx.textAlign = 'left'; cx = W * 0.04; }
-    if (pos === 'topright') { ctx.textAlign = 'right'; cx = W * 0.96; }
-    const pad = fs * 0.35;
-    ctx.fillStyle = 'rgba(0,0,0,.55)';
-    const bx = ctx.textAlign === 'center' ? cx - tw / 2 - pad : (ctx.textAlign === 'left' ? cx - pad : cx - tw - pad);
-    ctx.fillRect(bx, cy - fs / 2 - pad, tw + pad * 2, fs + pad * 2);
-    ctx.fillStyle = S.titleColor || '#fff';
-    ctx.fillText(S.streamTitle, cx, cy);
-  }
-  const a = document.createElement('a');
-  a.download = 'latchi-preview-' + new Date().toISOString().replace(/[:.]/g, '-') + '.png';
-  a.href = cv.toDataURL('image/png');
-  a.click();
-  toast('حُفظت صورة المعاينة مع البانر والعنوان', 'ok', 4200);
-}
-
-// ---------------------------------------------------------------- القص
-function cropToScreen() {
-  const img = $('#prevImg');
-  if (!box || !img.naturalWidth) return { x: 0, y: 0, w: S.screenW, h: S.screenH };
-  const fx = (S.screenW || img.naturalWidth) / img.naturalWidth;
-  const fy = (S.screenH || img.naturalHeight) / img.naturalHeight;
-  return {
-    x: Math.max(0, Math.round(box.x * fx)),
-    y: Math.max(0, Math.round(box.y * fy)),
-    w: Math.max(16, Math.round(box.w * fx)),
-    h: Math.max(16, Math.round(box.h * fy))
-  };
-}
-
-function renderCropBox(b) {
-  const el = $('#cropBox');
-  const layer = $('#cropLayer');
-  if (!b) { el.style.display = 'none'; return; }
-  layer.classList.add('on');
-  el.style.display = 'block';
-  el.style.left = b.x + 'px';
-  el.style.top = b.y + 'px';
-  el.style.width = b.w + 'px';
-  el.style.height = b.h + 'px';
-}
-
-function applyRatio() {
-  const img = $('#prevImg');
-  if (!img.naturalWidth) { toast('شغّل المعاينة لتحديد النسبة', 'warn'); return; }
-  const rr = RATIOS[S.ratio];
-  if (!rr) return;
-  const iw = previewStageW, ih = previewStageH;
-  let h = Math.min(ih, iw / rr), w = h * rr;
-  if (w > iw) { w = iw; h = w / rr; }
-  box = { x: Math.round((iw - w) / 2), y: Math.round((ih - h) / 2), w: Math.round(w), h: Math.round(h) };
-  renderCropBox(box);
-}
-
-function applyZoom(z) {
-  const img = $('#prevImg');
-  if (!img.naturalWidth) { toast('شغّل المعاينة أولاً', 'warn'); return; }
-  const iw = previewStageW, ih = previewStageH;
-  if (z <= 1.001) { applyRatio(); if (!box) return; return; }
-  const rr = box ? box.w / box.h : 16 / 9;
-  let w = iw / z, h = ih / z;
-  if (w / h > rr) w = h * rr; else h = w / rr;
-  const cx = box ? box.x + box.w / 2 : iw / 2;
-  const cy = box ? box.y + box.h / 2 : ih / 2;
-  let x = Math.round(cx - w / 2), y = Math.round(cy - h / 2);
-  x = Math.max(0, Math.min(iw - Math.round(w), x));
-  y = Math.max(0, Math.min(ih - Math.round(h), y));
-  box = { x, y, w: Math.round(w), h: Math.round(h) };
-  renderCropBox(box);
-}
-
-function setupCropDrag() {
-  const layer = $('#cropLayer');
-  const el = $('#cropBox');
-  const wrap = $('#prevImgWrap');
-
-  const pt = (ev) => {
-    const r = wrap.getBoundingClientRect();
-    return { x: ev.clientX - r.left, y: ev.clientY - r.top };
-  };
-
-  el.addEventListener('mousedown', e => {
-    if (!box) return;
-    const h = e.target.dataset && e.target.dataset.h;
-    const p = pt(e);
-    dragging = { mode: h || 'move', sx: p.x, sy: p.y, box: Object.assign({}, box) };
-    e.stopPropagation(); e.preventDefault();
-  });
-
-  layer.addEventListener('mousedown', e => {
-    if (e.target !== layer && e.target !== wrap) return;
-    const p = pt(e);
-    dragging = { mode: 'new', sx: p.x, sy: p.y, box: null };
-    e.preventDefault();
-  });
-
-  window.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    const p = pt(e);
-    const W = previewStageW, H = previewStageH;
-    const dx = p.x - dragging.sx, dy = p.y - dragging.sy;
-
-    if (dragging.mode === 'new') {
-      let x = Math.max(0, Math.min(dragging.sx, p.x));
-      let y = Math.max(0, Math.min(dragging.sy, p.y));
-      let w = Math.abs(p.x - dragging.sx), h = Math.abs(p.y - dragging.sy);
-      const rr = RATIOS[S.ratio];
-      if (rr) { h = w / rr; if (y + h > H) { h = H - y; w = h * rr; } }
-      w = Math.min(w, W - x); h = Math.min(h, H - y);
-      if (w < 20 || h < 20) return;
-      box = { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
-      renderCropBox(box);
-      return;
-    }
-
-    const b = dragging.box;
-    let nx = b.x, ny = b.y, nw = b.w, nh = b.h;
-    if (dragging.mode === 'move') {
-      nx = Math.max(0, Math.min(W - b.w, b.x + dx));
-      ny = Math.max(0, Math.min(H - b.h, b.y + dy));
-    } else {
-      if (dragging.mode.includes('w')) { nx = Math.max(0, b.x + dx); nw = b.w - (nx - b.x); }
-      if (dragging.mode.includes('e')) { nw = Math.max(24, b.w + dx); }
-      if (dragging.mode.includes('n')) { ny = Math.max(0, b.y + dy); nh = b.h - (ny - b.y); }
-      if (dragging.mode.includes('s')) { nh = Math.max(24, b.h + dy); }
-      nx = Math.max(0, Math.min(W - 24, nx));
-      ny = Math.max(0, Math.min(H - 24, ny));
-      nw = Math.min(nw, W - nx); nh = Math.min(nh, H - ny);
-    }
-    box = { x: Math.round(nx), y: Math.round(ny), w: Math.round(nw), h: Math.round(nh) };
-    renderCropBox(box);
-  });
-
-  window.addEventListener('mouseup', () => { dragging = null; });
-}
-
-// ---------------------------------------------------------------- البث
-async function startStream() {
-  if (streaming) return;
-  const btn = $('#btnStreamStart');
-
-  if (!S.youtubeKey) { toast('لا مفتاح بث — أدخله في اللوحة اليمنى', 'bad', 6000); return; }
-  if (S.captureMode !== 'desktop' && !String(S.windowTitle || '').trim()) {
-    toast('اختر نافذة، أو بدّل المصدر إلى «كل الشاشة»', 'bad', 6000); return;
-  }
-
-  if (box) {
-    const c = cropToScreen();
-    S.cropX = c.x; S.cropY = c.y; S.cropW = c.w; S.cropH = c.h;
-    persist({ cropX: c.x, cropY: c.y, cropW: c.w, cropH: c.h });
-  }
-
-  busy(btn, true, 'جارٍ الاتصال والتحقق…');
-  log('بدء البث — ' + S.outW + '×' + S.outH + ' @' + S.fps + ' · ' + S.videoBitrate +
-      ' · قص ' + S.cropW + '×' + S.cropH + ' من (' + S.cropX + ',' + S.cropY + ')');
-  log('سأتحقق من معدل الإطارات بعد 12 ثانية قبل أن أعلن النجاح…');
-
-  const r = await L.streamStart(S);
-  busy(btn, false);
-
-  if (!r.ok) {
-    toast('فشل بدء البث: ' + (r.error || 'سبب غير معروف'), 'bad', 10000);
-    log('فشل البث: ' + (r.error || ''), 'bad');
-    return;
-  }
-  streaming = true;
-  reflectStream(true);
-  previewOn = false; stopFrames();
-  $('#prevIdle').style.display = 'none';
-  $('#prevImg').style.display = 'none';
-  $('#prevImg').removeAttribute('src');
-  $('#cropLayer').classList.remove('on');
-  $('#btnPrevStop').disabled = true;
-  renderBannerOverlay();
-  renderTitleOverlay();
-  showLivePanel(true);
-  toast('البث انطلق على يوتيوب ✓ — ' + (r.fps ? r.fps.toFixed(1) : S.fps) + ' إطار/ث مُتحقَّق منه', 'ok', 6000);
-  log('البث يعمل — pid ' + r.pid + ' · الخادم ' + r.server +
-      ' · معدل مُتحقَّق منه ' + (r.fps ? r.fps.toFixed(1) : '?'), 'ok');
-}
-
-async function stopStream() {
-  await L.streamStop();
-  streaming = false;
-  reflectStream(false);
-  showLivePanel(false);
-  if (!previewOn) $('#prevIdle').style.display = 'grid';
-  toast('أُوقف البث', 'ok', 2600);
-  log('أُوقف البث بطلبك', 'ok');
-}
-
-// لوحة البث: تُعرض في مساحة المعاينة أثناء البث
-function showLivePanel(on) {
-  const el = $('#livePanel');
-  if (!el) return;
-  el.classList.toggle('on', !!on);
-  $('#cropLayer').classList.toggle('on', !on && previewOn && !!$('#prevImg').src);
-  if (on) {
-    $('#liveStatTitle').textContent = S.streamTitle || 'GTA VI LIVE STREAMING';
-    $('#liveStatRes').textContent = S.outW + ' × ' + S.outH + ' @ ' + S.fps;
-    $('#liveStatBr').textContent = S.videoBitrate;
-  }
-}
-
-function reflectStream(on) {
-  $('#liveBadge').classList.toggle('on', on);
-  $('#btnStreamStop').disabled = !on;
-  $('#btnStreamStart').disabled = on;
-  $('#btnPrevStart').disabled = on;
-}
-
-async function testKey() {
-  const btn = $('#btnKeyTest');
-  busy(btn, true, 'اختبار…');
-  log('اختبار مفتاح يوتيوب…');
-  const r = await L.keyTest(S.youtubeKey);
-  busy(btn, false);
-  if (r.ok) {
-    setChip($('#chipKey'), 'ok', 'المفتاح مقبول');
-    toast('✓ ' + r.message, 'ok', 5200);
-    log('نجح الاختبار: ' + r.message, 'ok');
-  } else {
-    setChip($('#chipKey'), 'bad', 'المفتاح مرفوض');
-    toast('✗ ' + r.error, 'bad', 9000);
-    log('فشل الاختبار: ' + r.error, 'bad');
-  }
-}
-
-// ---------------------------------------------------------------- الاستعلام
-function startPolling() {
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(async () => {
+function wire() {
+  // OAuth
+  $('#btnConnect').addEventListener('click', async () => {
+    hideErr();
     const st = await L.state();
-    $('#stFps').textContent = st.fps ? st.fps.toFixed(1) : '—';
-    $('#stDrop').textContent = st.dropped || 0;
-    $('#stTime').textContent = st.elapsed;
-    if (!restarting) $('#liveTime').textContent = st.elapsed;
-    if ($('#streamSpec')) {
-      $('#streamSpec').textContent = S ?
-        (S.outW + '×' + S.outH + ' @' + S.fps + 'fps · قص ' + (S.cropW || 0) + '×' + (S.cropH || 0)) : '';
-    }
-    const eff = st.streaming || restarting;
-    if (eff !== streaming) { streaming = eff; reflectStream(streaming); showLivePanel(streaming); }
-    if (st.streaming) {
-      const f = $('#liveStatFps'), tm = $('#liveStatTime');
-      if (f) f.textContent = (st.fps ? st.fps.toFixed(1) : '—') + ' / ' + (S ? S.fps : '');
-      if (tm) tm.textContent = st.elapsed;
-      // ★ تحذير حي: معدل منخفض = يوتيوب لا يعرض البث
-      const want = (S && S.fps) || 30;
-      if (st.fps > 0 && st.fps < Math.max(3, want / 3)) {
-        if (!lowFpsWarned) {
-          lowFpsWarned = true;
-          log('⚠ معدل الإطارات منخفض جداً (' + st.fps.toFixed(1) + '/' + want +
-              ') — يوتيوب لن يعرض البث. بدّل إلى «موفّر» أو قلّل القص.', 'bad');
-          toast('⚠ الجهاز عاجز عن هذه الجودة — بدّل إلى وضع «موفّر»', 'bad', 9000);
-        }
-        if (f) f.style.color = '#fca5a5';
-      } else {
-        lowFpsWarned = false;
-        if (f) f.style.color = '';
-      }
-    }
-  }, 1000);
-}
-
-// ---------------------------------------------------------------- المتصفح المدمج
-function openBrowser() {
-  $('#browserArea').classList.add('on');
-  if (!$('#browserUrl').value) $('#browserUrl').value = 'https://studio.youtube.com';
-  $('#browserUrl').focus();
-}
-function closeBrowser() {
-  $('#browserArea').classList.remove('on');
-  const wv = document.querySelector('#browserStage webview');
-  if (wv) wv.remove();
-  $('#browserHint').style.display = 'grid';
-}
-function goBrowser() {
-  let url = $('#browserUrl').value.trim();
-  if (!url) return;
-  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-  const stage = $('#browserStage');
-  let wv = stage.querySelector('webview');
-  if (!wv) {
-    wv = document.createElement('webview');
-    wv.setAttribute('allowpopups', 'true');
-    wv.setAttribute('partition', 'persist:latchi');
-    wv.style.width = '100%';
-    wv.style.height = '100%';
-    wv.addEventListener('did-navigate', (e) => {
-      if (e && e.url) { $('#browserUrl').value = e.url; persist({ platformUrl: e.url }); }
-    });
-    wv.addEventListener('did-navigate-in-page', (e) => {
-      if (e && e.url) $('#browserUrl').value = e.url;
-    });
-    stage.appendChild(wv);
-  }
-  $('#browserHint').style.display = 'none';
-  wv.src = url;
-  S.platformUrl = url;
-  persist({ platformUrl: url });
-  log('المتصفح المدمج: ' + url);
-}
-
-// ---------------------------------------------------------------- منبثق
-function openModal(title, hint) {
-  $('#mTitle').textContent = title;
-  $('#mHint').innerHTML = hint || '';
-  $('#mBody').innerHTML = '';
-  $('#modal').classList.add('on');
-  $('#mClose').onclick = () => $('#modal').classList.remove('on');
-}
-
-// ---------------------------------------------------------------- بدء
-window.addEventListener('DOMContentLoaded', () => {
-  try { wireFfPanel(); } catch (e) {}
-  // فحص صامت عند الإقلاع: يُحدّث الشريحة فقط ولا يفتح لوحة (لا نزعج المستخدم عند النجاح)
-  setTimeout(() => { try { checkFfmpeg(false); } catch (e) {} }, 2500);
-  boot().catch(e => {
-    console.error(e);
-    $('#gateHint').textContent = 'خطأ في التحميل: ' + (e && e.message);
+    if (!st.clientConfigured) { $('#modalOauth').classList.add('on'); return; }
+    toast('فُتح متصفح النظام — اختر حسابك واسمح بالوصول');
+    $('#btnConnect').disabled = true;
+    const r = await L.connect();
+    $('#btnConnect').disabled = false;
+    if (r.ok) {
+      toast('تم ربط الحساب ✓');
+      await refresh();
+      await loadChannels();
+      loadCategories();
+    } else showErr('فشل ربط الحساب', r.error || 'خطأ غير معروف');
   });
-});
-
-
-// ============================================================ نظام ffmpeg المضاد للفشل
-// الفكرة: قبل أي معاينة أو بث نتحقق فعلياً أن ffmpeg قابل للتنفيذ.
-// إن لم يكن ⇒ نُظهر لوحة إصلاح واضحة بدل رسالة عامة أو نافذة تُفتح وتُغلق.
-let FF_OK = null;      // null = لم يُفحص بعد
-
-async function checkFfmpeg(showPanel) {
-  let st = { ok: false };
-  try { st = await window.latchi.ffmpegStatus(); } catch (e) { st = { ok: false, error: String(e) }; }
-  FF_OK = !!st.ok;
-  const chip = document.querySelector('#chipFfmpeg');
-  if (chip) {
-    chip.className = 'chip ' + (st.ok ? 'ok' : 'bad');
-    chip.title = st.ok ? ('ffmpeg ' + (st.version || '') + ' — ' + st.path) : 'ffmpeg غير قابل للتنفيذ';
-  }
-  if (!st.ok && showPanel !== false) openFfPanel(st);
-  return st;
-}
-
-function openFfPanel(st) {
-  const p = document.querySelector('#ffPanel');
-  if (!p) return;
-  const m = document.querySelector('#ffMeta');
-  if (m) {
-    const lines = [];
-    if (st && st.path) lines.push('path: ' + st.path);
-    if (st && st.version) lines.push('version: ' + st.version);
-    if (st && st.reason) lines.push('reason: ' + st.reason);
-    if (st && st.permanentDir) lines.push('permanent: ' + st.permanentDir);
-    if (st && st.searched && st.searched.length) lines.push('searched:\n' + st.searched.slice(0, 8).join('\n'));
-    m.textContent = lines.join('\n');
-  }
-  p.classList.add('on');
-}
-
-function closeFfPanel() {
-  const p = document.querySelector('#ffPanel');
-  if (p) p.classList.remove('on');
-}
-
-function wireFfPanel() {
-  const on = (sel, fn) => { const el = document.querySelector(sel); if (el) el.addEventListener('click', fn); };
-
-  on('#ffRetry', async () => {
-    toast('جارٍ إعادة الفحص وتثبيت ffmpeg في مجلد دائم…', 'info', 5000);
-    let r = {};
-    try { r = await window.latchi.ffmpegRetry(); } catch (e) { r = { ok: false, reason: String(e) }; }
-    if (r && r.ok) { FF_OK = true; closeFfPanel(); toast('تم إصلاح ffmpeg (' + (r.version || '') + ')', 'ok', 5000); await checkFfmpeg(false); }
-    else openFfPanel(r || {});
+  $('#btnDisconnect').addEventListener('click', async () => {
+    await L.disconnect();
+    channels = []; renderChannels('');
+    toast('تم قطع الربط');
+    refresh();
   });
 
-  on('#ffPick', async () => {
-    let r = {};
-    try { r = await window.latchi.ffmpegPick(); } catch (e) { r = { ok: false, reason: String(e) }; }
-    if (r && r.ok) { FF_OK = true; closeFfPanel(); toast('تم تثبيت ffmpeg من الملف الذي اخترته', 'ok', 5000); await checkFfmpeg(false); }
-    else if (r && !r.canceled) openFfPanel(r || {});
+  // إعداد OAuth
+  $('#btnSetupOauth').addEventListener('click', () => $('#modalOauth').classList.add('on'));
+  $('#btnSettings').addEventListener('click', () => $('#modalOauth').classList.add('on'));
+  $('#btnOauthCancel').addEventListener('click', () => $('#modalOauth').classList.remove('on'));
+  $('#btnOauthSave').addEventListener('click', async () => {
+    const id = $('#inClientId').value.trim();
+    const r = await L.setClientId(id);
+    if (r.ok) { $('#modalOauth').classList.remove('on'); toast('حُفظ Client ID ✓'); refresh(); }
+    else toast(r.error || 'معرّف غير صالح', true);
   });
 
-  on('#ffOpenDir', () => { try { window.latchi.ffmpegOpenDir(); } catch (e) {} });
-  on('#ffSkip', () => { closeFfPanel(); toast('تجاهلت ffmpeg — البث لن يعمل حتى تصلحه', 'warn', 5000); });
+  // القنوات
+  $('#btnRefreshCh').addEventListener('click', loadChannels);
+  $('#btnChangeCh').addEventListener('click', () => {
+    if (channels.length <= 1) { loadChannels(); return; }
+    $('#chList').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    toast('اختر القناة من القائمة');
+  });
 
-  try {
-    window.latchi.onFfmpegReady(d => {
-      if (d && d.ok) {
-        FF_OK = true;
-        const chip = document.querySelector('#chipFfmpeg');
-        if (chip) { chip.className = 'chip ok'; chip.title = 'ffmpeg ' + (d.version || '') + ' — ' + d.path; }
-      }
-    });
-  } catch (e) {}
-}
-
-// اعتراض الضغطتين قبل الإقلاع: إن لم يكن ffmpeg جاهزاً لا نُقلع
-function ffGuard(then) {
-  return async () => {
-    if (FF_OK === null) await checkFfmpeg(false);
-    if (FF_OK === false) { const st = await checkFfmpeg(true); return false; }
-    then();
-    return true;
+  // الفيديو
+  const pick = async () => {
+    hideErr();
+    toast('جارٍ فحص الملف…');
+    const r = await L.pickVideo();
+    if (r.canceled) return;
+    if (!r.ok) { showErr('تعذّر فحص الفيديو', r.error || 'ملف غير مدعوم'); return; }
+    toast('تم فحص الفيديو ✓ ' + (r.video.copySafe ? '(نسخ مباشر بلا ترميز)' : '(ترميز خفيف)'));
+    refresh();
   };
+  $('#btnSelectVideo').addEventListener('click', pick);
+  $('#btnChangeVideo').addEventListener('click', pick);
+  $('#dropZone').addEventListener('click', pick);
+
+  // الصورة المصغّرة
+  $('#btnThumb').addEventListener('click', async () => {
+    const r = await L.pickThumbnail();
+    if (r.canceled) return;
+    if (!r.ok) { toast(r.error || 'تعذّر اختيار الصورة', true); return; }
+    toast('حُفظت الصورة المصغّرة');
+    refresh();
+  });
+
+  // العنوان
+  $('#inTitle').addEventListener('input', e => {
+    $('#titleCount').textContent = e.target.value.length + ' / 100';
+  });
+
+  // البدء / الإيقاف
+  $('#btnStart').addEventListener('click', async () => {
+    hideErr();
+    $('#btnStart').disabled = true;
+    const meta = {
+      title: $('#inTitle').value.trim() || 'LATCHI STREAM',
+      description: $('#inDesc').value,
+      privacy: (document.querySelector('input[name=priv]:checked') || {}).value || 'unlisted',
+      madeForKids: $('#inKids').checked,
+      categoryId: $('#inCategory').value || ''
+    };
+    toast('جارٍ تجهيز البث على YouTube…');
+    const r = await L.startLive(meta);
+    if (!r.ok) showErr('تعذّر بدء البث', r.error || 'خطأ غير معروف');
+    else toast('بدأ البث — راقب الحالة');
+    refresh();
+  });
+  $('#btnStop').addEventListener('click', async () => {
+    $('#btnStop').disabled = true;
+    toast('جارٍ إيقاف البث…');
+    const r = await L.stopLive();
+    $('#btnStop').disabled = false;
+    if (r.ok) toast('تم إيقاف البث وإنهاؤه على YouTube');
+    refresh();
+  });
+
+  // الروابط
+  $('#btnWatch').addEventListener('click', () => { if (S && S.broadcast) L.openUrl(S.broadcast.watchUrl); });
+  $('#btnStudio').addEventListener('click', () => { if (S && S.broadcast) L.openUrl(S.broadcast.studioUrl); });
+
+  // السجل
+  $('#btnClearLog').addEventListener('click', () => {
+    $('#logbox').innerHTML = '<div style="color:#5f7392">لا سجلات بعد.</div>';
+    logCount = 0;
+  });
+
+  // سحب ملف على الواجهة
+  document.addEventListener('dragover', e => { e.preventDefault(); $('#dropZone') && $('#dropZone').classList.add('hot'); });
+  document.addEventListener('dragleave', () => $('#dropZone') && $('#dropZone').classList.remove('hot'));
+  document.addEventListener('drop', async e => {
+    e.preventDefault();
+    $('#dropZone') && $('#dropZone').classList.remove('hot');
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!f) return;
+    // في Electron نحتاج المسار الحقيقي — نحصل عليه من webUtils عند الحاجة؛ هنا نعتمد زر الاختيار
+    toast('استخدم زر SELECT VIDEO لاختيار الملف');
+  });
+
+  L.onState(render);
+  L.onLog(addLog);
 }
 
+async function loadCategories() {
+  const r = await L.categories();
+  if (!r.ok || !r.categories) return;
+  const sel = $('#inCategory');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— تلقائي —</option>' +
+    r.categories.map(c => `<option value="${esc(c.id)}">${esc(c.title)}</option>`).join('');
+  if (cur) sel.value = cur;
+}
+
+// ------------------------------------------------------------------ الإقلاع
+(async function boot() {
+  wire();
+  await refresh();
+  if (S && S.auth && S.auth.connected) { await loadChannels(); loadCategories(); }
+  else if (S && S.clientConfigured === false) {
+    toast('ابدأ بـ «إعداد OAuth» لإضافة Google Client ID');
+  }
+})();

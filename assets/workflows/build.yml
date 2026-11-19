@@ -1,14 +1,10 @@
 name: Build LATCHI STREAM
 
-# بناء تلقائي على GitHub — لا حاجة لبناء محلي.
-# التشغيل: Actions → Build LATCHI STREAM → Run workflow
-# المتغير BUNDLE_FFMPEG = 1 يجعل ffmpeg.exe مرفقاً + الحزمة محمولة (يُنصح به)
-
 on:
   workflow_dispatch:
     inputs:
       bundle_ffmpeg:
-        description: 'إرفاق ffmpeg.exe داخل الحزمة المحمولة'
+        description: 'إرفاق ffmpeg.exe داخل الحزمة'
         type: choice
         options: ['1', '0']
         default: '1'
@@ -28,105 +24,72 @@ jobs:
     name: Windows x64
     runs-on: windows-latest
     timeout-minutes: 40
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # الـ workflow يعيش في assets/workflows حتى لا يُحذف من مساحة العمل،
-      # ويُنسخ هنا عند التشغيل. الـ workflow الأساسي هو نسخة من هذا الملف نفسه.
-      - name: Self-heal workflow file
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path .github/workflows | Out-Null
-          if (Test-Path assets/workflows/build.yml) {
-            Copy-Item assets/workflows/build.yml .github/workflows/build.yml -Force
-          }
-          Write-Host "workflow ready"
-
       - name: Setup Node 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20.18.1'
-          cache: 'npm'
+          node-version: '20'
 
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        run: npm install --no-audit --no-fund
 
       - name: Syntax check
-        shell: pwsh
         run: |
           node --check main.js
           node --check preload.js
-          node --check core/LatchiCore.js
           node --check ui/app.js
-          Write-Host "syntax OK"
+          node --check core/OAuth.js
+          node --check core/YouTubeApi.js
+          node --check core/VideoStream.js
 
-      - name: Unit tests (core)
+      - name: Unit tests
         run: node tests/core.test.js
 
-      - name: Download ffmpeg
+      - name: Download ffmpeg (ffmpeg + ffprobe)
         if: ${{ github.event_name == 'push' || inputs.bundle_ffmpeg == '1' }}
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path resources/ffmpeg | Out-Null
           $url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
-          Write-Host "Downloading $url"
           Invoke-WebRequest -Uri $url -OutFile ff.zip -UseBasicParsing
           Expand-Archive -Path ff.zip -DestinationPath ffx -Force
-          $exe = Get-ChildItem ffx -Filter ffmpeg.exe -Recurse | Select-Object -First 1
-          if (-not $exe) { throw 'ffmpeg.exe not found in archive' }
-          Copy-Item $exe.FullName resources/ffmpeg/ffmpeg.exe -Force
-          Remove-Item ff.zip -Force -ErrorAction SilentlyContinue
-          Remove-Item ffx -Recurse -Force -ErrorAction SilentlyContinue
-          $size = (Get-Item resources/ffmpeg/ffmpeg.exe).Length
-          Write-Host "ffmpeg.exe = $size bytes"
-          if ($size -lt 1000000) { throw 'ffmpeg.exe too small' }
+          $ff = Get-ChildItem ffx -Filter ffmpeg.exe -Recurse | Select-Object -First 1
+          $fp = Get-ChildItem ffx -Filter ffprobe.exe -Recurse | Select-Object -First 1
+          if (-not $ff) { throw 'ffmpeg.exe not found' }
+          if (-not $fp) { throw 'ffprobe.exe not found' }
+          Copy-Item $ff.FullName resources/ffmpeg/ffmpeg.exe -Force
+          Copy-Item $fp.FullName resources/ffmpeg/ffprobe.exe -Force
+          Remove-Item ff.zip, ffx -Recurse -Force -ErrorAction SilentlyContinue
+          foreach ($n in @('ffmpeg.exe','ffprobe.exe')) {
+            $s = (Get-Item "resources/ffmpeg/$n").Length
+            Write-Host "$n = $s bytes"
+            if ($s -lt 1000000) { throw "$n غير مكتمل" }
+          }
 
-      - name: Remove ffmpeg from resources when not bundling
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.bundle_ffmpeg == '0' }}
-        shell: pwsh
-        run: |
-          Remove-Item resources/ffmpeg/ffmpeg.exe -Force -ErrorAction SilentlyContinue
-
-      # ---------- مخرجات صغيرة أولاً ----------
       - name: Build NSIS installer (x64)
         run: npx electron-builder --win nsis --x64 --publish never
-
-      - name: Verify ffmpeg is inside the packaged app
-        shell: pwsh
-        run: |
-          $p = 'dist/win-unpacked/resources/ffmpeg/ffmpeg.exe'
-          if (-not (Test-Path $p)) { throw "ffmpeg.exe مفقود من الحزمة: $p" }
-          $sz = (Get-Item $p).Length
-          Write-Host "ffmpeg.exe داخل الحزمة = $sz bytes"
-          if ($sz -lt 1000000) { throw "ffmpeg.exe غير مكتمل ($sz bytes)" }
-
-      - name: Zip the NSIS unpacked folder (المسار المستقر — الأصل الأساسي)
-        shell: pwsh
-        run: |
-          if (-not (Test-Path dist/win-unpacked)) { throw 'dist/win-unpacked غير موجود' }
-          $zip = 'dist/LATCHI-STREAM-win-x64.zip'
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-          Compress-Archive -Path dist/win-unpacked/* -DestinationPath $zip -CompressionLevel Optimal
-          $z = Get-Item $zip
-          Write-Host "zip: $($z.Length) bytes"
-          # سجلّ محتوى حاسم داخل الـ ZIP للتحقق لاحقاً
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $a = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
-          $entries = $a.Entries | Where-Object { $_.FullName -like '*ffmpeg*' -or $_.FullName -like '*.exe' }
-          $a.Dispose()
-          $entries | Select-Object FullName, Length | Format-Table -AutoSize
-          if (-not ($entries | Where-Object { $_.FullName -like '*resources/ffmpeg/ffmpeg.exe' -or $_.FullName -like '*resources\ffmpeg\ffmpeg.exe' })) {
-            throw 'ffmpeg.exe غير موجود داخل الـ ZIP'
-          }
 
       - name: Build portable (x64)
         run: npx electron-builder --win portable --x64 --publish never
 
-      - name: Build ia32 installer
-        continue-on-error: true
-        run: npx electron-builder --win nsis --ia32 --publish never
+      - name: Verify packaged app (ffmpeg + no secrets)
+        shell: pwsh
+        run: |
+          $un = 'dist/win-unpacked'
+          if (-not (Test-Path $un)) { throw 'win-unpacked غير موجود' }
+          if (Test-Path "$un/resources/ffmpeg/ffmpeg.exe") {
+            Write-Host "ffmpeg داخل الحزمة = $((Get-Item "$un/resources/ffmpeg/ffmpeg.exe").Length) bytes"
+          }
+          if (Test-Path "$un/resources/ffmpeg/ffprobe.exe") {
+            Write-Host "ffprobe داخل الحزمة = $((Get-Item "$un/resources/ffmpeg/ffprobe.exe").Length) bytes"
+          }
+          # لا أسرار داخل الحزمة
+          $bad = Get-ChildItem $un -Recurse -Include oauth.json,oauth-client.json,settings.json -ErrorAction SilentlyContinue
+          if ($bad) { throw "ملفات أسرار داخل الحزمة: $($bad.FullName)" }
+          Write-Host 'لا أسرار في الحزمة ✓'
 
       - name: List artifacts
         shell: pwsh
@@ -135,25 +98,31 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: LATCHI-STREAM-v3.2.1-windows
-          path: |
-            dist/*.exe
-            dist/*.zip
-            dist/*.yml
-          if-no-files-found: warn
-          retention-days: 30
+          name: LATCHI-STREAM-v4.0.0-windows
+          path: dist/*.exe
 
       - name: Publish release
         if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release) }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'push' && github.ref_name || 'latchi-stream-v3.2.1' }}
-          name: 'LATCHI STREAM v3.2.1'
-          draft: false
-          generate_release_notes: true
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || 'latchi-stream-v4.0.0' }}
+          name: 'LATCHI STREAM v4.0.0'
+          body: |
+            # LATCHI STREAM v4.0.0
+
+            **تحوّل كامل**: من التقاط الشاشة إلى **بث فيديوهات محلية على YouTube** عبر Google OAuth.
+
+            ## الملفات
+            - `LATCHI-STREAM-4.0.0-Setup.exe` — مثبّت
+            - `LATCHI-STREAM-4.0.0-Portable.exe` — محمول
+
+            ## ما الجديد
+            - تسجيل دخول Google (OAuth + PKCE) في متصفح النظام
+            - اختيار قناتك من YouTube (يدعم القنوات المتعددة وBrand Accounts)
+            - SELECT VIDEO: تختار ملفاً محلياً وتنشره على قناتك مباشرة
+            - نسخ مباشر بلا ترميز عند توافق الملف · ترميز خفيف عند الحاجة
+            - إيقاف تلقائي عند نهاية الفيديو + إنهاء البث عبر API (لا بث عالق)
+            - لا التقاط شاشة · لا معاينة · **لا ميكروفون**
           files: |
-            dist/*.zip
             dist/*.exe
-            dist/*.yml
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          generate_release_notes: true
